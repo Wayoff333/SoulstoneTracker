@@ -1,0 +1,8 @@
+## Interface: 11200
+## Title: SoulstoneTracker
+## Notes: Tracks soulstones on raid members
+## Author: Waylock
+## Version: 1.0
+## SavedVariables: SoulstoneTrackerDB
+
+SoulstoneTracker.lua
