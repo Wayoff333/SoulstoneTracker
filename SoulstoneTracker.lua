@@ -138,9 +138,10 @@ end
 -- Persistence
 -------------------------------------------------------------------------------
 
-local function saveStones()
+local function saveAll()
     if not SoulstoneTrackerDB then return end
     local now = time()
+    -- Save stones
     local saved = {}
     for target, data in pairs(m.stones) do
         if data.expires > now then
@@ -148,17 +149,34 @@ local function saveStones()
         end
     end
     SoulstoneTrackerDB.stones = saved
+    -- Save curses
+    SoulstoneTrackerDB.curses = m.curses
+    -- Save banish
+    SoulstoneTrackerDB.banish = m.banish
 end
 
-local function loadStones()
-    if not SoulstoneTrackerDB or not SoulstoneTrackerDB.stones then return end
-    local now = time()
-    for target, data in pairs(SoulstoneTrackerDB.stones) do
-        if data.expires > now then
-            m.stones[target] = { caster=data.caster, expires=data.expires, castTime=data.castTime or now, warnedFiveMin=data.warnedFiveMin or false, warnedOneMin=data.warnedOneMin or false }
+local function loadAll()
+    if not SoulstoneTrackerDB then return end
+    -- Load stones
+    if SoulstoneTrackerDB.stones then
+        local now = time()
+        for target, data in pairs(SoulstoneTrackerDB.stones) do
+            if data.expires > now then
+                m.stones[target] = { caster=data.caster, expires=data.expires, castTime=data.castTime or now, warnedFiveMin=data.warnedFiveMin or false, warnedOneMin=data.warnedOneMin or false }
+            end
         end
+        SoulstoneTrackerDB.stones = nil
     end
-    SoulstoneTrackerDB.stones = nil
+    -- Load curses
+    if SoulstoneTrackerDB.curses then
+        m.curses = SoulstoneTrackerDB.curses
+        SoulstoneTrackerDB.curses = nil
+    end
+    -- Load banish
+    if SoulstoneTrackerDB.banish then
+        m.banish = SoulstoneTrackerDB.banish
+        SoulstoneTrackerDB.banish = nil
+    end
 end
 
 -------------------------------------------------------------------------------
@@ -1078,7 +1096,7 @@ local lastCaster = nil
 
 local eFrame = CreateFrame("Frame")
 eFrame:RegisterEvent("PLAYER_LOGIN")
-eFrame:RegisterEvent("PLAYER_LOGOUT")
+eFrame:RegisterEvent("PLAYER_LEAVING_WORLD")
 eFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
 eFrame:RegisterEvent("PARTY_MEMBERS_CHANGED")
 eFrame:RegisterEvent("RAID_ROSTER_UPDATE")
@@ -1099,7 +1117,7 @@ eFrame:RegisterEvent("CHAT_MSG_ADDON")
 eFrame:SetScript("OnEvent", function()
     if event == "PLAYER_LOGIN" then
         SoulstoneTrackerDB = SoulstoneTrackerDB or {}
-        loadStones()
+        loadAll()
         m.createFrame()
         m.createMinimapButton()
         if SoulstoneTrackerDB.hidden then m.frame:Hide() else m.frame:Show() end
@@ -1120,8 +1138,8 @@ eFrame:SetScript("OnEvent", function()
             end
         end)
 
-    elseif event == "PLAYER_LOGOUT" then
-        saveStones()
+    elseif event == "PLAYER_LEAVING_WORLD" then
+        saveAll()
 
     elseif event == "PARTY_MEMBERS_CHANGED" or event == "RAID_ROSTER_UPDATE" then
         m.refreshBanish()
