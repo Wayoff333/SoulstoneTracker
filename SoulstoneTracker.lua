@@ -6,17 +6,24 @@ SoulstoneTracker = {}
 local m = SoulstoneTracker
 
 local SOULSTONE_DURATION = 30 * 60
-local FONT     = "Fonts\\FRIZQT__.TTF"
-local FRAME_W  = 380
-local ROW_H    = 16
-local TITLE_H  = 22
-local MAX_ROWS = 10
+local FONT      = "Fonts\\FRIZQT__.TTF"
+local BASE_W    = 380
+local ROW_H     = 18
+local TITLE_H   = 22
+local HEADER_H  = 16
+local MAX_ROWS  = 10
+local MIN_W     = 250
 local ADDON_MSG_PREFIX = "SSTracker"
 
-m.stones   = {}
-m.frame    = nil
-m.locked   = false
-m.minimap  = nil
+-- Column proportions (as fraction of frame width)
+local COL_CASTER_END  = 0.38  -- caster takes 0-38%
+local COL_ARROW       = 0.40  -- arrow at 40%
+local COL_TARGET_END  = 0.72  -- target takes 40-72%
+-- expires takes 72-100%
+
+m.stones  = {}
+m.frame   = nil
+m.locked  = false
 
 -------------------------------------------------------------------------------
 -- Utility
@@ -40,25 +47,17 @@ local function say(msg)
     DEFAULT_CHAT_FRAME:AddMessage("|cffa050ff[SS]|r " .. msg)
 end
 
-local function playSound(sound)
-    PlaySound(sound)
-end
-
--- Check if any soulstones are active
 local function hasActiveStones()
     for _ in pairs(m.stones) do return true end
     return false
 end
 
--- Get all warlocks in raid without active soulstones
 local function getWarlocksMissingStones()
     local missing = {}
     local numRaid = GetNumRaidMembers()
-    if numRaid == 0 then
-        -- Check party
-        for i = 1, GetNumPartyMembers() do
-            local name = UnitName("party"..i)
-            local class = UnitClass("party"..i)
+    if numRaid > 0 then
+        for i = 1, numRaid do
+            local name, _, _, _, class = GetRaidRosterInfo(i)
             if name and class == "Warlock" then
                 local hasCast = false
                 for _, data in pairs(m.stones) do
@@ -68,8 +67,9 @@ local function getWarlocksMissingStones()
             end
         end
     else
-        for i = 1, numRaid do
-            local name, _, _, _, class = GetRaidRosterInfo(i)
+        for i = 1, GetNumPartyMembers() do
+            local name = UnitName("party"..i)
+            local class = UnitClass("party"..i)
             if name and class == "Warlock" then
                 local hasCast = false
                 for _, data in pairs(m.stones) do
@@ -113,7 +113,7 @@ function m.addStone(target, caster, expires, silent)
     m.stones[target] = { caster = caster, expires = exp, castTime = time() }
     if not silent then
         say("|cffa050ff"..caster.."|r soulstoned |cffffffff"..target.."|r")
-        playSound("SPELLBOOKCLOSE")
+        PlaySound("SPELLBOOKCLOSE")
         broadcastStone(target, caster, exp)
     end
     m.refresh()
@@ -133,17 +133,16 @@ function m.clearExpired()
     for target, data in pairs(m.stones) do
         if now >= data.expires then
             say("|cffff3333[WARNING]|r Soulstone expired on |cffffffff"..target.."|r")
-            playSound("LOOTCLOSE")
+            PlaySound("LOOTCLOSE")
             m.stones[target] = nil
             changed = true
         end
     end
     if changed then
         m.refresh()
-        -- Warn if no stones remain
         if not hasActiveStones() then
             say("|cffff3333[WARNING]|r No active soulstones in the raid!")
-            playSound("RAID_WARNING")
+            PlaySound("RAID_WARNING")
             local missing = getWarlocksMissingStones()
             if table.getn(missing) > 0 then
                 say("|cffff7c0aWarlocks without soulstone: |cffffffff"..table.concat(missing, ", ").."|r")
@@ -153,81 +152,138 @@ function m.clearExpired()
 end
 
 -------------------------------------------------------------------------------
+-- Buff Scan
+-------------------------------------------------------------------------------
+
+function m.scanForSoulstones()
+    local units = {}
+    local numRaid = GetNumRaidMembers()
+    if numRaid > 0 then
+        for i = 1, numRaid do table.insert(units, "raid"..i) end
+    else
+        table.insert(units, "player")
+        for i = 1, GetNumPartyMembers() do table.insert(units, "party"..i) end
+    end
+    local found = 0
+    for _, unit in ipairs(units) do
+        local name = UnitName(unit)
+        if name then
+            local i = 1
+            while true do
+                local buffName = UnitBuff(unit, i)
+                if not buffName then break end
+                if string.find(buffName, "Soulstone") then
+                    if not m.stones[name] then
+                        m.addStone(name, "Unknown", nil, true)
+                        found = found + 1
+                    end
+                end
+                i = i + 1
+            end
+        end
+    end
+    if found > 0 then
+        say("Found "..found.." existing soulstone(s) on group members.")
+        m.refresh()
+    end
+end
+
+-------------------------------------------------------------------------------
 -- Minimap Button
 -------------------------------------------------------------------------------
 
 function m.createMinimapButton()
     local radius = 80
-    local button = CreateFrame("Button", "SoulstoneTrackerMinimap", Minimap)
-    button:SetWidth(20)
-    button:SetHeight(20)
-    button:SetFrameStrata("MEDIUM")
-    button:SetFrameLevel(8)
-    button:SetClampedToScreen(true)
+    local btn = CreateFrame("Button", "SoulstoneTrackerMinimap", Minimap)
+    btn:SetWidth(20)
+    btn:SetHeight(20)
+    btn:SetFrameStrata("MEDIUM")
+    btn:SetFrameLevel(8)
+    btn:SetClampedToScreen(true)
 
-    local icon = button:CreateTexture(nil, "BACKGROUND")
-    icon:SetTexture("Interface\\TargetingFrame\\UI-RaidTargetingIcon_8")
-    icon:SetWidth(18)
-    icon:SetHeight(18)
-    icon:SetPoint("Center", button, "Center", 0, 0)
-
-    local bg = button:CreateTexture(nil, "BACKGROUND")
+    local bg = btn:CreateTexture(nil, "BACKGROUND")
     bg:SetTexture("Interface\\Minimap\\UI-Minimap-ZoomButton-Background")
-    bg:SetWidth(20)
-    bg:SetHeight(20)
-    bg:SetAllPoints(button)
+    bg:SetAllPoints(btn)
 
-    local border = button:CreateTexture(nil, "OVERLAY")
+    local icon = btn:CreateTexture(nil, "OVERLAY")
+    icon:SetTexture("Interface\\TargetingFrame\\UI-RaidTargetingIcon_8")
+    icon:SetWidth(16)
+    icon:SetHeight(16)
+    icon:SetPoint("Center", btn, "Center", 0, 0)
+
+    local border = btn:CreateTexture(nil, "OVERLAY")
     border:SetTexture("Interface\\Minimap\\MiniMap-TrackingBorder")
     border:SetWidth(56)
     border:SetHeight(56)
-    border:SetPoint("TopLeft", button, "TopLeft", -17, 17)
+    border:SetPoint("TopLeft", btn, "TopLeft", -17, 17)
 
-    -- Position on minimap
     local angle = SoulstoneTrackerDB.minimapAngle or 195
     local function updatePos()
-        local x = math.cos(math.rad(angle)) * radius
-        local y = math.sin(math.rad(angle)) * radius
-        button:SetPoint("Center", Minimap, "Center", x, y)
+        btn:SetPoint("Center", Minimap, "Center", math.cos(math.rad(angle))*radius, math.sin(math.rad(angle))*radius)
     end
     updatePos()
 
-    -- Drag to reposition
-    button:RegisterForDrag("LeftButton")
-    button:SetScript("OnDragStart", function()
-        button:SetScript("OnUpdate", function()
+    btn:RegisterForDrag("LeftButton")
+    btn:SetScript("OnDragStart", function()
+        btn:SetScript("OnUpdate", function()
             local mx, my = Minimap:GetCenter()
             local px, py = GetCursorPosition()
-            local scale = Minimap:GetEffectiveScale()
-            px, py = px/scale, py/scale
-            angle = math.deg(math.atan2(py-my, px-mx))
+            local s = Minimap:GetEffectiveScale()
+            angle = math.deg(math.atan2(py/s - my, px/s - mx))
             SoulstoneTrackerDB.minimapAngle = angle
             updatePos()
         end)
     end)
-    button:SetScript("OnDragStop", function()
-        button:SetScript("OnUpdate", nil)
-    end)
-
-    button:SetScript("OnClick", function()
+    btn:SetScript("OnDragStop", function() btn:SetScript("OnUpdate", nil) end)
+    btn:SetScript("OnClick", function()
         if m.frame:IsVisible() then
-            m.frame:Hide()
-            SoulstoneTrackerDB.hidden = true
+            m.frame:Hide() SoulstoneTrackerDB.hidden = true
         else
-            m.frame:Show()
-            SoulstoneTrackerDB.hidden = false
+            m.frame:Show() SoulstoneTrackerDB.hidden = false
         end
     end)
-
-    button:SetScript("OnEnter", function()
-        GameTooltip:SetOwner(button, "ANCHOR_LEFT")
+    btn:SetScript("OnEnter", function()
+        GameTooltip:SetOwner(btn, "ANCHOR_LEFT")
         GameTooltip:SetText("|cffa050ffSoulstone Tracker|r")
-        GameTooltip:AddLine("Click to toggle", 1, 1, 1)
+        GameTooltip:AddLine("Click to toggle", 1,1,1)
         GameTooltip:Show()
     end)
-    button:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    btn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    m.minimap = btn
+end
 
-    m.minimap = button
+-------------------------------------------------------------------------------
+-- UI helpers - reposition columns based on current frame width
+-------------------------------------------------------------------------------
+
+function m.repositionColumns()
+    local f = m.frame
+    if not f or not f.cols then return end
+    local w = f:GetWidth()
+
+    local cx  = math.floor(w * COL_CASTER_END)
+    local ax  = math.floor(w * COL_ARROW)
+    local tx  = ax + 14
+    local tw  = math.floor(w * COL_TARGET_END) - tx - 4
+    local ew  = w - math.floor(w * COL_TARGET_END) - 8
+
+    -- Headers
+    f.cols.hTarget:ClearAllPoints()
+    f.cols.hTarget:SetPoint("TopLeft", f, "TopLeft", tx, -(TITLE_H + HEADER_H/2))
+
+    -- Rows
+    for i = 1, MAX_ROWS do
+        local row = f.rows[i]
+        if row then
+            row.caster:SetWidth(cx - 8)
+            row.arrow:ClearAllPoints()
+            row.arrow:SetPoint("TopLeft", f, "TopLeft", ax, -(TITLE_H + HEADER_H + 2 + (i-1)*ROW_H))
+            row.target:ClearAllPoints()
+            row.target:SetPoint("TopLeft", f, "TopLeft", tx, -(TITLE_H + HEADER_H + 2 + (i-1)*ROW_H))
+            row.target:SetWidth(tw)
+            row.timer:SetWidth(ew)
+        end
+    end
 end
 
 -------------------------------------------------------------------------------
@@ -235,9 +291,12 @@ end
 -------------------------------------------------------------------------------
 
 function m.createFrame()
+    local savedW = SoulstoneTrackerDB.size and SoulstoneTrackerDB.size.w or BASE_W
+    local savedH = SoulstoneTrackerDB.size and SoulstoneTrackerDB.size.h or TITLE_H + HEADER_H + ROW_H + 6
+
     local f = CreateFrame("Frame", "SoulstoneTrackerFrame", UIParent)
-    f:SetWidth(FRAME_W)
-    f:SetHeight(TITLE_H + 20 + ROW_H)
+    f:SetWidth(savedW)
+    f:SetHeight(savedH)
     f:SetFrameStrata("MEDIUM")
     f:SetBackdrop({
         bgFile   = "Interface\\Buttons\\WHITE8X8",
@@ -249,6 +308,7 @@ function m.createFrame()
     f:SetBackdropBorderColor(0.25, 0.25, 0.35, 1)
     f:EnableMouse(true)
     f:SetMovable(true)
+    f:SetResizable(true)
     f:SetClampedToScreen(true)
     f:RegisterForDrag("LeftButton")
     f:SetScript("OnDragStart", function()
@@ -258,6 +318,12 @@ function m.createFrame()
         this:StopMovingOrSizing()
         local point, _, rpoint, x, y = this:GetPoint()
         SoulstoneTrackerDB.position = { point=point, rpoint=rpoint, x=x, y=y }
+    end)
+    f:SetScript("OnSizeChanged", function()
+        local w = math.max(MIN_W, this:GetWidth())
+        this:SetWidth(w)
+        SoulstoneTrackerDB.size = { w = w, h = this:GetHeight() }
+        m.repositionColumns()
     end)
 
     -- Title bar
@@ -274,29 +340,29 @@ function m.createFrame()
     grad:SetBlendMode("ADD")
     grad:SetVertexColor(0.2, 0.05, 0.4, 0.4)
 
-    -- Title text
     local title = titleBar:CreateFontString(nil, "OVERLAY")
     title:SetFont(FONT, 11, "OUTLINE")
     title:SetPoint("Left", titleBar, "Left", 6, 0)
     title:SetText("|cffffd700Soulstone Tracker v1.0|r")
     f.title = title
 
-    -- Lock button (padlock using WoW action bar lock textures)
+    -- Lock button using SetNormalTexture (same method as Threatmeter)
     local lockBtn = CreateFrame("Button", nil, titleBar)
-    lockBtn:SetWidth(14)
-    lockBtn:SetHeight(14)
-    lockBtn:SetPoint("Right", titleBar, "Right", -22, 0)
-    local lockTex = lockBtn:CreateTexture(nil, "OVERLAY")
-    lockTex:SetAllPoints(lockBtn)
-    lockTex:SetTexture("Interface\\ActionBar\\UI-ActionBar-Padlock")
-    lockTex:SetVertexColor(0.6, 0.6, 0.6, 1)
+    lockBtn:SetWidth(16)
+    lockBtn:SetHeight(16)
+    lockBtn:SetPoint("Right", titleBar, "Right", -24, 0)
+    lockBtn:SetNormalTexture("Interface\\addons\\SoulstoneTracker\\images\\icon_unlocked.tga")
+    lockBtn:SetHighlightTexture("Interface\\Buttons\\ButtonHilight-Square")
+
     local function updateLock()
         if m.locked then
-            lockTex:SetVertexColor(0.2, 1, 0.2, 1)
+            lockBtn:SetNormalTexture("Interface\\addons\\SoulstoneTracker\\images\\icon_locked.tga")
         else
-            lockTex:SetVertexColor(0.6, 0.6, 0.6, 1)
+            lockBtn:SetNormalTexture("Interface\\addons\\SoulstoneTracker\\images\\icon_unlocked.tga")
         end
     end
+    f.updateLock = updateLock
+
     lockBtn:SetScript("OnEnter", function()
         GameTooltip:SetOwner(lockBtn, "ANCHOR_BOTTOM")
         GameTooltip:SetText(m.locked and "Unlock frame" or "Lock frame", 1,1,1)
@@ -309,7 +375,6 @@ function m.createFrame()
         updateLock()
         say(m.locked and "Frame locked." or "Frame unlocked.")
     end)
-    f.updateLock = updateLock
 
     -- X close button
     local closeBtn = CreateFrame("Button", nil, titleBar)
@@ -330,23 +395,23 @@ function m.createFrame()
     end)
 
     -- Column headers
-    local hY = -(TITLE_H + 3)
+    local hY = -(TITLE_H + HEADER_H/2)
 
     local hCaster = f:CreateFontString(nil, "OVERLAY")
-    hCaster:SetFont(FONT, 9, "OUTLINE")
-    hCaster:SetTextColor(0.8, 0.8, 0.8, 1)
+    hCaster:SetFont(FONT, 10, "OUTLINE")
+    hCaster:SetTextColor(0.85, 0.85, 0.85, 1)
     hCaster:SetPoint("TopLeft", f, "TopLeft", 8, hY)
     hCaster:SetText("Caster")
 
     local hTarget = f:CreateFontString(nil, "OVERLAY")
-    hTarget:SetFont(FONT, 9, "OUTLINE")
-    hTarget:SetTextColor(0.8, 0.8, 0.8, 1)
-    hTarget:SetPoint("TopLeft", f, "TopLeft", 175, hY)
+    hTarget:SetFont(FONT, 10, "OUTLINE")
+    hTarget:SetTextColor(0.85, 0.85, 0.85, 1)
+    hTarget:SetPoint("TopLeft", f, "TopLeft", math.floor(savedW * COL_ARROW) + 14, hY)
     hTarget:SetText("Target")
 
     local hExpires = f:CreateFontString(nil, "OVERLAY")
-    hExpires:SetFont(FONT, 9, "OUTLINE")
-    hExpires:SetTextColor(0.8, 0.8, 0.8, 1)
+    hExpires:SetFont(FONT, 10, "OUTLINE")
+    hExpires:SetTextColor(0.85, 0.85, 0.85, 1)
     hExpires:SetPoint("TopRight", f, "TopRight", -8, hY)
     hExpires:SetJustifyH("Right")
     hExpires:SetText("Expires")
@@ -354,81 +419,100 @@ function m.createFrame()
     -- Divider
     local div = f:CreateTexture(nil, "ARTWORK")
     div:SetHeight(1)
-    div:SetPoint("TopLeft",  f, "TopLeft",  1, -(TITLE_H + 14))
-    div:SetPoint("TopRight", f, "TopRight", -1, -(TITLE_H + 14))
+    div:SetPoint("TopLeft",  f, "TopLeft",  1, -(TITLE_H + HEADER_H))
+    div:SetPoint("TopRight", f, "TopRight", -1, -(TITLE_H + HEADER_H))
     div:SetTexture(0.3, 0.15, 0.5, 0.8)
 
     -- Empty label
     local empty = f:CreateFontString(nil, "OVERLAY")
     empty:SetFont(FONT, 10, "OUTLINE")
     empty:SetTextColor(0.4, 0.4, 0.4, 1)
-    empty:SetPoint("TopLeft", f, "TopLeft", 8, -(TITLE_H + 17))
+    empty:SetPoint("TopLeft", f, "TopLeft", 8, -(TITLE_H + HEADER_H + 3))
     empty:SetText("No active soulstones")
     f.empty = empty
+
+    -- Store column header refs for repositioning
+    f.cols = { hTarget = hTarget }
 
     -- Rows
     f.rows = {}
     for i = 1, MAX_ROWS do
-        local rowY = -(TITLE_H + 15 + (i-1) * ROW_H)
+        local rowY = -(TITLE_H + HEADER_H + 2 + (i-1)*ROW_H)
+        local w = savedW
 
         local bg = f:CreateTexture(nil, "BACKGROUND")
         bg:SetPoint("TopLeft",  f, "TopLeft",  1, rowY)
         bg:SetPoint("TopRight", f, "TopRight", -1, rowY)
         bg:SetHeight(ROW_H)
-        if math.mod(i, 2) == 0 then
-            bg:SetTexture(1, 1, 1, 0.04)
-        else
-            bg:SetTexture(0, 0, 0, 0)
-        end
+        if math.mod(i, 2) == 0 then bg:SetTexture(1,1,1,0.04) else bg:SetTexture(0,0,0,0) end
         bg:Hide()
 
         local caster = f:CreateFontString(nil, "OVERLAY")
         caster:SetFont(FONT, 11, "OUTLINE")
         caster:SetPoint("TopLeft", f, "TopLeft", 8, rowY)
-        caster:SetWidth(155)
+        caster:SetWidth(math.floor(w * COL_CASTER_END) - 8)
         caster:SetJustifyH("Left")
 
         local arrow = f:CreateFontString(nil, "OVERLAY")
         arrow:SetFont(FONT, 11, "OUTLINE")
         arrow:SetTextColor(0.4, 0.4, 0.4, 1)
-        arrow:SetPoint("TopLeft", f, "TopLeft", 163, rowY)
+        arrow:SetPoint("TopLeft", f, "TopLeft", math.floor(w * COL_ARROW), rowY)
         arrow:SetText("->")
 
         local target = f:CreateFontString(nil, "OVERLAY")
         target:SetFont(FONT, 11, "OUTLINE")
-        target:SetPoint("TopLeft", f, "TopLeft", 177, rowY)
-        target:SetPoint("TopRight", f, "TopRight", -85, rowY)
+        target:SetPoint("TopLeft", f, "TopLeft", math.floor(w * COL_ARROW) + 14, rowY)
+        target:SetWidth(math.floor(w * COL_TARGET_END) - math.floor(w * COL_ARROW) - 18)
         target:SetJustifyH("Left")
 
         local timer = f:CreateFontString(nil, "OVERLAY")
         timer:SetFont(FONT, 11, "OUTLINE")
         timer:SetPoint("TopRight", f, "TopRight", -8, rowY)
-        timer:SetWidth(75)
+        timer:SetWidth(w - math.floor(w * COL_TARGET_END) - 8)
         timer:SetJustifyH("Right")
 
-        -- Hover tooltip
+        -- Tooltip hitbox
         local hitbox = CreateFrame("Frame", nil, f)
+        hitbox:SetHeight(ROW_H)
         hitbox:SetPoint("TopLeft",  f, "TopLeft",  1, rowY)
         hitbox:SetPoint("TopRight", f, "TopRight", -1, rowY)
-        hitbox:SetHeight(ROW_H)
         hitbox:EnableMouse(true)
-        hitbox.index = i
+        hitbox.rowIndex = i
         hitbox:SetScript("OnEnter", function()
-            local row = f.rows[this.index]
+            local row = f.rows[this.rowIndex]
             if not row or not row.data then return end
-            local data = row.data
+            local d = row.data
             GameTooltip:SetOwner(this, "ANCHOR_CURSOR")
-            GameTooltip:SetText("|cffa050ff"..data.caster.."|r → |cffffffff"..data.target.."|r")
-            GameTooltip:AddLine("Cast: "..date("%H:%M:%S", data.castTime), 0.8, 0.8, 0.8)
-            GameTooltip:AddLine("Expires: "..date("%H:%M:%S", data.expires), 0.8, 0.8, 0.8)
-            local secs = timeLeft(data.expires)
-            GameTooltip:AddLine("Time left: "..string.format("%dm %02ds", math.floor(secs/60), math.mod(secs,60)), 1, 1, 0)
+            GameTooltip:SetText("|cffa050ff"..d.caster.."|r -> |cffffffff"..d.target.."|r")
+            GameTooltip:AddLine("Cast: "..date("%H:%M:%S", d.castTime), 0.8, 0.8, 0.8)
+            GameTooltip:AddLine("Expires: "..date("%H:%M:%S", d.expires), 0.8, 0.8, 0.8)
+            local s = timeLeft(d.expires)
+            GameTooltip:AddLine(string.format("Time left: %dm %02ds", math.floor(s/60), math.mod(s,60)), 1,1,0)
             GameTooltip:Show()
         end)
         hitbox:SetScript("OnLeave", function() GameTooltip:Hide() end)
 
         f.rows[i] = { caster=caster, arrow=arrow, target=target, timer=timer, bg=bg, hitbox=hitbox, data=nil }
     end
+
+    -- Resize grip using SetNormalTexture
+    local grip = CreateFrame("Button", nil, f)
+    grip:SetWidth(16)
+    grip:SetHeight(16)
+    grip:SetPoint("BottomRight", f, "BottomRight", 0, 0)
+    grip:SetFrameLevel(f:GetFrameLevel() + 10)
+    grip:SetNormalTexture("Interface\\addons\\SoulstoneTracker\\ResizeGrip")
+    grip:SetHighlightTexture("Interface\\Buttons\\ButtonHilight-Square")
+    grip:SetScript("OnEnter", function()
+        GameTooltip:SetOwner(grip, "ANCHOR_LEFT")
+        GameTooltip:SetText("Drag to resize", 1,1,1)
+        GameTooltip:Show()
+    end)
+    grip:SetScript("OnLeave", function()
+        GameTooltip:Hide()
+    end)
+    grip:SetScript("OnMouseDown", function() f:StartSizing("BOTTOMRIGHT") end)
+    grip:SetScript("OnMouseUp", function() f:StopMovingOrSizing() end)
 
     -- Ticker
     local tick = 0
@@ -442,7 +526,7 @@ function m.createFrame()
     end)
 
     -- Restore position
-    if SoulstoneTrackerDB and SoulstoneTrackerDB.position then
+    if SoulstoneTrackerDB.position then
         local p = SoulstoneTrackerDB.position
         f:ClearAllPoints()
         f:SetPoint(p.point, UIParent, p.rpoint, p.x, p.y)
@@ -450,18 +534,14 @@ function m.createFrame()
         f:SetPoint("Center", UIParent, "Center", 300, 0)
     end
 
-    -- Restore scale
-    if SoulstoneTrackerDB and SoulstoneTrackerDB.scale then
-        f:SetScale(SoulstoneTrackerDB.scale)
-    end
-
     -- Restore lock
-    if SoulstoneTrackerDB and SoulstoneTrackerDB.locked then
+    if SoulstoneTrackerDB.locked then
         m.locked = true
-        f.updateLock()
+        updateLock()
     end
 
     m.frame = f
+    m.repositionColumns()
     m.refresh()
 end
 
@@ -474,18 +554,16 @@ function m.refresh()
         table.insert(list, { target=target, caster=data.caster, expires=data.expires, castTime=data.castTime or 0 })
     end
     table.sort(list, function(a,b) return a.expires < b.expires end)
-
     local count = table.getn(list)
 
-    if count == 0 then f.empty:Show() else f.empty:Hide() end
-
-    -- Warlock warning in title
     local missing = getWarlocksMissingStones()
     if table.getn(missing) > 0 and (GetNumRaidMembers() > 0 or GetNumPartyMembers() > 0) then
-        f.title:SetText("|cffffd700Soulstone Tracker|r |cffff7c0a["..table.getn(missing).." warlock(s) missing]|r")
+        f.title:SetText("|cffffd700Soulstone Tracker|r |cffff7c0a["..table.getn(missing).." missing]|r")
     else
         f.title:SetText("|cffffd700Soulstone Tracker v1.0|r")
     end
+
+    if count == 0 then f.empty:Show() else f.empty:Hide() end
 
     for i = 1, MAX_ROWS do
         local row  = f.rows[i]
@@ -508,51 +586,7 @@ function m.refresh()
     end
 
     local rows = math.max(1, count)
-    f:SetHeight(TITLE_H + 16 + (rows * ROW_H) + 4)
-end
-
--------------------------------------------------------------------------------
--- Buff Scan - check existing soulstones on login/reload
--------------------------------------------------------------------------------
-
-function m.scanForSoulstones()
-    local units = {}
-    local numRaid = GetNumRaidMembers()
-    if numRaid > 0 then
-        for i = 1, numRaid do
-            table.insert(units, "raid"..i)
-        end
-    else
-        table.insert(units, "player")
-        for i = 1, GetNumPartyMembers() do
-            table.insert(units, "party"..i)
-        end
-    end
-
-    local found = 0
-    for _, unit in ipairs(units) do
-        local name = UnitName(unit)
-        if name then
-            local i = 1
-            while true do
-                local buffName, buffRank, buffIcon, buffCount = UnitBuff(unit, i)
-                if not buffName then break end
-                if string.find(buffName, "Soulstone") then
-                    -- vanilla WoW doesn't give expiry time from UnitBuff
-                    -- so we just add it with full duration
-                    if not m.stones[name] then
-                        m.addStone(name, "Unknown", nil, true)
-                    end
-                    found = found + 1
-                end
-                i = i + 1
-            end
-        end
-    end
-    if found > 0 then
-        say("Found "..found.." existing soulstone(s) on group members.")
-        m.refresh()
-    end
+    f:SetHeight(TITLE_H + HEADER_H + (rows * ROW_H) + 6)
 end
 
 -------------------------------------------------------------------------------
@@ -560,7 +594,6 @@ end
 -------------------------------------------------------------------------------
 
 local lastCaster = nil
-
 local eFrame = CreateFrame("Frame")
 eFrame:RegisterEvent("PLAYER_LOGIN")
 eFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
@@ -579,28 +612,18 @@ eFrame:SetScript("OnEvent", function()
         m.createFrame()
         m.createMinimapButton()
         if SoulstoneTrackerDB.hidden then m.frame:Hide() else m.frame:Show() end
-        say("Loaded. |cffffd700/ss|r toggle  |cffffd700/ss test|r  |cffffd700/ss scale 0.8|r  |cffffd700/ss warlocks|r")
-        -- Scan for existing soulstones after a short delay
-        local scanTimer = CreateFrame("Frame")
-        local scanElapsed = 0
-        scanTimer:SetScript("OnUpdate", function()
-            scanElapsed = scanElapsed + arg1
-            if scanElapsed >= 2 then
-                scanTimer:SetScript("OnUpdate", nil)
-                m.scanForSoulstones()
-            end
+        say("Loaded. |cffffd700/ss|r toggle  |cffffd700/ss test|r  |cffffd700/ss help|r")
+        local t = CreateFrame("Frame") local e = 0
+        t:SetScript("OnUpdate", function()
+            e = e + arg1
+            if e >= 2 then t:SetScript("OnUpdate", nil) m.scanForSoulstones() end
         end)
 
     elseif event == "PLAYER_ENTERING_WORLD" then
-        -- Re-scan after zone changes/reloads
-        local scanTimer = CreateFrame("Frame")
-        local scanElapsed = 0
-        scanTimer:SetScript("OnUpdate", function()
-            scanElapsed = scanElapsed + arg1
-            if scanElapsed >= 3 then
-                scanTimer:SetScript("OnUpdate", nil)
-                m.scanForSoulstones()
-            end
+        local t = CreateFrame("Frame") local e = 0
+        t:SetScript("OnUpdate", function()
+            e = e + arg1
+            if e >= 3 then t:SetScript("OnUpdate", nil) m.scanForSoulstones() end
         end)
 
     elseif event == "SPELLCAST_START" then
@@ -642,10 +665,9 @@ eFrame:SetScript("OnEvent", function()
         end
 
     elseif event == "CHAT_MSG_ADDON" then
-        -- arg1=prefix, arg2=message, arg3=channel, arg4=sender
         if arg1 == ADDON_MSG_PREFIX and arg4 ~= UnitName("player") then
             if string.find(arg2, "^ADD:") then
-                local _, target, caster, expires = string.match(arg2, "^(ADD):(.+):(.+):(%d+)$")
+                local target, caster, expires = string.match(arg2, "^ADD:(.+):(.+):(%d+)$")
                 if target and caster and expires then
                     m.addStone(target, caster, tonumber(expires), true)
                 end
@@ -668,14 +690,10 @@ SlashCmdList["SOULSTONETRACKER"] = function(args)
     local cmd = string.lower(string.gsub(args, "^%s*(.-)%s*$", "%1"))
 
     if cmd == "clear" then
-        m.stones = {}
-        m.refresh()
-        say("Cleared.")
-
+        m.stones = {} m.refresh() say("Cleared.")
     elseif cmd == "test" then
         m.addStone(UnitName("player"), UnitName("player"))
         say("Test stone added.")
-
     elseif cmd == "list" then
         local n = 0
         for target, data in pairs(m.stones) do
@@ -684,52 +702,33 @@ SlashCmdList["SOULSTONETRACKER"] = function(args)
             n = n + 1
         end
         if n == 0 then say("No active soulstones.") end
-
     elseif cmd == "warlocks" then
         local missing = getWarlocksMissingStones()
         if table.getn(missing) == 0 then
             say("All warlocks have active soulstones!")
         else
-            say("|cffff7c0aWarlocks without soulstone:|r |cffffffff"..table.concat(missing, ", ").."|r")
+            say("|cffff7c0aMissing: |cffffffff"..table.concat(missing, ", ").."|r")
         end
-
     elseif cmd == "lock" then
         m.locked = not m.locked
         SoulstoneTrackerDB.locked = m.locked
         m.frame.updateLock()
         say(m.locked and "Frame locked." or "Frame unlocked.")
-
-    elseif string.find(cmd, "^scale") then
-        local val = string.match(cmd, "scale%s+([%d%.]+)")
-        local scale = tonumber(val)
-        if scale and scale >= 0.5 and scale <= 2.0 then
-            m.frame:SetScale(scale)
-            SoulstoneTrackerDB.scale = scale
-            say("Scale set to "..scale)
-        else
-            say("Usage: /ss scale 0.5-2.0")
-        end
-
+    elseif cmd == "scan" then
+        m.scanForSoulstones()
+    elseif cmd == "reset" then
+        SoulstoneTrackerDB.position = nil
+        SoulstoneTrackerDB.size = nil
+        say("Position and size reset. /reload to apply.")
     elseif cmd == "help" then
-        say("|cffffd700Commands:|r")
-        say("/ss — toggle window")
-        say("/ss test — add test stone")
-        say("/ss clear — clear all stones")
-        say("/ss list — list active stones")
-        say("/ss warlocks — show warlocks without stones")
-        say("/ss lock — toggle frame lock")
-        say("/ss scale 0.8 — resize (0.5-2.0)")
-
+        say("|cffffd700/ss|r toggle  |cffffd700/ss test|r  |cffffd700/ss clear|r  |cffffd700/ss list|r")
+        say("|cffffd700/ss warlocks|r  |cffffd700/ss lock|r  |cffffd700/ss scan|r  |cffffd700/ss reset|r")
     else
         if m.frame and m.frame:IsVisible() then
-            m.frame:Hide()
-            SoulstoneTrackerDB.hidden = true
-            say("Hidden.")
+            m.frame:Hide() SoulstoneTrackerDB.hidden = true say("Hidden.")
         else
             if not m.frame then m.createFrame() end
-            m.frame:Show()
-            SoulstoneTrackerDB.hidden = false
-            say("Shown.")
+            m.frame:Show() SoulstoneTrackerDB.hidden = false say("Shown.")
         end
     end
 end
