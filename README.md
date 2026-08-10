@@ -1,6 +1,7 @@
 
 Made for Octowow
 
+will sync with anyone running the addon
 V1.1 added curse/banish assignment
 use /ss help for commands
 
