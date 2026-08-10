@@ -1,6 +1,7 @@
 
 Made for Octowow
 
+V1.1 added curse/banish assignment
 use /ss help for commands
 
 Tracks Soulstones caster and target, will sync/update if others have the addon installed
