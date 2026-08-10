@@ -19,9 +19,39 @@ local COL_CASTER_END = 0.38
 local COL_ARROW      = 0.40
 local COL_TARGET_END = 0.72
 
-m.stones  = {}
-m.frame   = nil
-m.locked  = false
+-- Curse tracking
+local CURSES = {
+    ["Curse of the Elements"]    = "CoE",
+    ["Curse of Shadow"]          = "CoS",
+    ["Curse of Recklessness"]    = "CoR",
+    ["Curse of Weakness"]        = "CoW",
+}
+local CURSE_COLORS = {
+    ["CoE"] = "|cffaa00ff",  -- Purple
+    ["CoS"] = "|cff0099ff",  -- Blue
+    ["CoR"] = "|cffff3333",  -- Red
+    ["CoW"] = "|cff00cc44",  -- Green
+}
+local CURSE_DIVIDER_H = 14
+local CURSE_ROW_H     = 16
+
+-- Raid target icons (texture coords in UI-RaidTargetingIcons)
+local RAID_ICONS = {
+    { name = "Star",     coords = {0,    0.25, 0,    0.25} },
+    { name = "Circle",   coords = {0.25, 0.5,  0,    0.25} },
+    { name = "Diamond",  coords = {0.5,  0.75, 0,    0.25} },
+    { name = "Triangle", coords = {0.75, 1,    0,    0.25} },
+    { name = "Moon",     coords = {0,    0.25, 0.25, 0.5 } },
+    { name = "Square",   coords = {0.25, 0.5,  0.25, 0.5 } },
+    { name = "Cross",    coords = {0.5,  0.75, 0.25, 0.5 } },
+    { name = "Skull",    coords = {0.75, 1,    0.25, 0.5 } },
+}
+
+m.stones   = {}
+m.curses   = {}  -- { shortName = { caster } }
+m.banish   = {}  -- { warlockName = raidIconIndex }
+m.frame    = nil
+m.locked   = false
 
 -------------------------------------------------------------------------------
 -- Utility
@@ -214,7 +244,7 @@ function m.clearExpired()
             PlaySound("RAID_WARNING")
             local missing = getWarlocksMissingStones()
             if table.getn(missing) > 0 then
-                say("|cffff7c0aWarlocks without soulstone: |cffffffff"..table.concat(missing, ", ").."|r")
+                say("|cffff7c0aWarlocks with available SS: |cffffffff"..table.concat(missing, ", ").."|r")
             end
         end
     end
@@ -573,6 +603,123 @@ function m.createFrame()
         f.rows[i] = { caster=caster, arrow=arrow, target=target, timer=timer, bg=bg, hitbox=hitbox, data=nil }
     end
 
+    local SEC_ROW_H = 18
+
+    -- Combined Warlock section (curse + banish on same row)
+    local warlockDivTex = f:CreateTexture(nil, "ARTWORK")
+    warlockDivTex:SetHeight(1)
+    warlockDivTex:SetTexture(0.3, 0.15, 0.5, 0.8)
+    f.curseDivider = warlockDivTex
+
+    local warlockHdr = f:CreateFontString(nil, "OVERLAY")
+    warlockHdr:SetFont(FONT, 8, "OUTLINE")
+    warlockHdr:SetTextColor(0.6, 0.6, 0.6, 1)
+    warlockHdr:SetText("CURSE AND BANISH ASSIGNMENT")
+    f.curseHeader = warlockHdr
+
+    -- One row per warlock (up to 5), shows: Name | CurseIcon | BanishIcon
+    f.warlockRows = {}
+    for i = 1, 5 do
+        local bg = f:CreateTexture(nil, "BACKGROUND")
+        bg:SetHeight(SEC_ROW_H)
+        if math.mod(i,2)==0 then bg:SetTexture(1,1,1,0.04) else bg:SetTexture(0,0,0,0) end
+        bg:Hide()
+
+        -- Warlock name
+        local nameTxt = f:CreateFontString(nil, "OVERLAY")
+        nameTxt:SetFont(FONT, 11, "OUTLINE")
+        nameTxt:SetJustifyH("Left")
+        nameTxt:Hide()
+
+        -- Curse icon (auto-detected)
+        local curseIcon = f:CreateTexture(nil, "ARTWORK")
+        curseIcon:SetWidth(14)
+        curseIcon:SetHeight(14)
+        curseIcon:Hide()
+
+        -- Curse label
+        local curseLbl = f:CreateFontString(nil, "OVERLAY")
+        curseLbl:SetFont(FONT, 10, "OUTLINE")
+        curseLbl:SetJustifyH("Left")
+        curseLbl:Hide()
+
+        -- Banish icon button
+        local banishBtn = CreateFrame("Button", "SSWarlockBanish_"..i, f)
+        banishBtn:SetWidth(16)
+        banishBtn:SetHeight(16)
+        banishBtn:SetFrameLevel(f:GetFrameLevel() + 5)
+        banishBtn.rowIndex = i
+
+        local banishTex = banishBtn:CreateTexture(nil, "ARTWORK")
+        banishTex:SetAllPoints(banishBtn)
+        banishTex:SetTexture("Interface\\TargetingFrame\\UI-RaidTargetingIcons")
+        banishTex:SetTexCoord(0,0,0,0)
+        banishBtn.iconTex = banishTex
+
+        local banishLbl = banishBtn:CreateFontString(nil, "OVERLAY")
+        banishLbl:SetFont(FONT, 10, "OUTLINE")
+        banishLbl:SetAllPoints(banishBtn)
+        banishLbl:SetJustifyH("Center")
+        banishLbl:SetJustifyV("Middle")
+        banishLbl:SetTextColor(0.4, 0.4, 0.4, 1)
+        banishLbl:SetText("-")
+        banishBtn.lbl = banishLbl
+
+        banishBtn:SetScript("OnEnter", function()
+            local row = f.warlockRows[this.rowIndex]
+            if not row or not row.warlockName then return end
+            GameTooltip:SetOwner(banishBtn, "ANCHOR_LEFT")
+            GameTooltip:SetText(row.warlockName, 0.6, 0.3, 1)
+            local idx = m.banish[row.warlockName]
+            GameTooltip:AddLine(idx and ("Banish: "..RAID_ICONS[idx].name) or "Click to assign banish target", 1,1,0)
+            GameTooltip:Show()
+        end)
+        banishBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        banishBtn:SetScript("OnClick", function()
+            local row = f.warlockRows[this.rowIndex]
+            if not row or not row.warlockName then return end
+            local wName = row.warlockName
+            local menu = CreateFrame("Frame", "SSWarlockMenu_"..this.rowIndex, UIParent, "UIDropDownMenuTemplate")
+            UIDropDownMenu_Initialize(menu, function()
+                local none = { text="-- None --", notCheckable=true }
+                none.func = function()
+                    m.banish[wName] = nil
+                    m.refreshBanish()
+                    local ch = GetNumRaidMembers()>0 and "RAID" or (GetNumPartyMembers()>0 and "PARTY" or nil)
+                    if ch then SendAddonMessage(ADDON_MSG_PREFIX, "BANISH:"..wName..":0", ch) end
+                end
+                UIDropDownMenu_AddButton(none)
+                for idx, iconData in ipairs(RAID_ICONS) do
+                    local ii = { text=iconData.name, notCheckable=true, arg1=idx }
+                    ii.func = function(iconIdx)
+                        m.banish[wName] = iconIdx
+                        m.refreshBanish()
+                        local msg = "[Banish] "..wName.." -> "..RAID_ICONS[iconIdx].name
+                        say(msg)
+                        local ch = GetNumRaidMembers()>0 and "RAID" or (GetNumPartyMembers()>0 and "PARTY" or nil)
+                        if ch then sendGroup(msg) SendAddonMessage(ADDON_MSG_PREFIX, "BANISH:"..wName..":"..iconIdx, ch) end
+                    end
+                    UIDropDownMenu_AddButton(ii)
+                end
+            end, "MENU")
+            ToggleDropDownMenu(1, nil, menu, "cursor", 0, 0)
+        end)
+        banishBtn:Hide()
+
+        f.warlockRows[i] = {
+            bg=bg, nameTxt=nameTxt, curseIcon=curseIcon, curseLbl=curseLbl,
+            banishBtn=banishBtn, banishTex=banishTex, banishLbl=banishLbl,
+            warlockName=nil
+        }
+    end
+
+    -- Keep these for compatibility
+    f.curseRows  = {}
+    f.banishRows = {}
+    f.banishDivider = f:CreateTexture(nil, "ARTWORK") -- unused but referenced
+    f.banishHeader  = f:CreateFontString(nil, "OVERLAY") -- unused but referenced
+
+
     -- Resize grip
     local grip = CreateFrame("Button", nil, f)
     grip:SetWidth(16)
@@ -600,8 +747,6 @@ function m.createFrame()
             m.clearExpired()
             m.refresh()
         end
-
-        -- Flash title bar if any stone is under 1 minute
         local shouldFlash = false
         local now = time()
         for _, data in pairs(m.stones) do
@@ -693,7 +838,231 @@ function m.refresh()
     end
 
     local rows = math.max(1, count)
-    f:SetHeight(TITLE_H + HEADER_H + (rows * ROW_H) + 6)
+    -- Height is managed by refreshBanish which accounts for all sections
+    m.refreshBanish()
+end
+
+function m.refreshBanish()
+    if not m.frame then return end
+    local f = m.frame
+    local SEC_ROW_H = 18
+    local HEADER_H2 = 10
+
+    -- Curse icons - exact paths verified from GetSpellTexture in-game
+    local CURSE_ICONS = {
+        ["CoE"] = "Interface\\Icons\\Spell_Shadow_ChillTouch",        -- Curse of the Elements
+        ["CoS"] = "Interface\\Icons\\Spell_Shadow_CurseOfAchimonde",  -- Curse of Shadow
+        ["CoR"] = "Interface\\Icons\\Spell_Shadow_UnholyStrength",    -- Curse of Recklessness
+        ["CoW"] = "Interface\\Icons\\Spell_Shadow_CurseOfMannoroth",  -- Curse of Weakness
+    }
+    local FALLBACK_ICON = "Interface\\Icons\\Spell_Shadow_UnholyStrength"
+
+    -- Build warlock list
+    local warlocks = {}
+    local playerName = UnitName("player")
+    if playerName then table.insert(warlocks, playerName) end
+    local numRaid = GetNumRaidMembers()
+    if numRaid > 0 then
+        for i = 1, numRaid do
+            local name, _, _, _, class = GetRaidRosterInfo(i)
+            if name and name ~= playerName and class == "Warlock" then
+                table.insert(warlocks, name)
+            end
+        end
+    else
+        for i = 1, GetNumPartyMembers() do
+            local name = UnitName("party"..i)
+            if name and UnitClass("party"..i) == "Warlock" then
+                table.insert(warlocks, name)
+            end
+        end
+    end
+
+    -- Build reverse curse lookup: warlock name -> shortName
+    local warlockCurse = {}
+    for shortName, data in pairs(m.curses) do
+        if data.caster then
+            warlockCurse[data.caster] = shortName
+        end
+    end
+
+    -- Count stones for base Y
+    local stoneCount = 0
+    for _ in pairs(m.stones) do stoneCount = stoneCount + 1 end
+    local stoneRows = math.max(1, stoneCount)
+    local baseY = -(TITLE_H + HEADER_H + stoneRows * ROW_H + 6)
+    local curY = baseY
+
+    local warlockCount = table.getn(warlocks)
+
+    if not f.warlockRows then
+        -- Frame height only
+        f:SetHeight(TITLE_H + HEADER_H + stoneRows * ROW_H + 6)
+        return
+    end
+
+    if warlockCount > 0 then
+        -- Divider
+        f.curseDivider:ClearAllPoints()
+        f.curseDivider:SetPoint("TopLeft",  f, "TopLeft",  1, curY)
+        f.curseDivider:SetPoint("TopRight", f, "TopRight", -1, curY)
+        f.curseDivider:Show()
+        -- Header inline on divider
+        f.curseHeader:ClearAllPoints()
+        f.curseHeader:SetPoint("TopLeft", f, "TopLeft", 8, curY + 5)
+        f.curseHeader:Show()
+        curY = curY - 2
+
+        for i = 1, 5 do
+            local row = f.warlockRows[i]
+            local wName = warlocks[i]
+            if row then
+                row.warlockName = wName
+                if wName then
+                    -- Bg
+                    row.bg:ClearAllPoints()
+                    row.bg:SetPoint("TopLeft",  f, "TopLeft",  1, curY)
+                    row.bg:SetPoint("TopRight", f, "TopRight", -1, curY)
+                    row.bg:SetHeight(SEC_ROW_H)
+                    row.bg:Show()
+
+                    -- Name
+                    row.nameTxt:ClearAllPoints()
+                    row.nameTxt:SetPoint("TopLeft", f, "TopLeft", 8, curY - 2)
+                    row.nameTxt:SetWidth(f:GetWidth() * 0.5)
+                    row.nameTxt:SetText("|cffa050ff"..wName.."|r")
+                    row.nameTxt:Show()
+
+                    -- Curse info (centered in row)
+                    local shortName = warlockCurse[wName]
+                    if shortName then
+                        row.curseIcon:ClearAllPoints()
+                        row.curseIcon:SetPoint("TopLeft", f, "TopLeft", math.floor(f:GetWidth() * 0.45), curY - 2)
+                        row.curseIcon:SetTexture(CURSE_ICONS[shortName] or "Interface\\Icons\\Spell_Shadow_Curse")
+                        row.curseIcon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+                        row.curseIcon:Show()
+                        row.curseLbl:ClearAllPoints()
+                        row.curseLbl:SetPoint("TopLeft", f, "TopLeft", math.floor(f:GetWidth() * 0.45) + 18, curY - 2)
+                        row.curseLbl:SetText((CURSE_COLORS[shortName] or "|cffffffff")..shortName.."|r")
+                        row.curseLbl:Show()
+                    else
+                        row.curseIcon:Hide()
+                        row.curseLbl:Hide()
+                    end
+
+                    -- Banish icon button (right side, moved in from edge)
+                    row.banishBtn:ClearAllPoints()
+                    row.banishBtn:SetPoint("TopRight", f, "TopRight", -24, curY - 1)
+                    row.banishBtn:Show()
+                    local iconIdx = m.banish[wName]
+                    if iconIdx and RAID_ICONS[iconIdx] then
+                        local c = RAID_ICONS[iconIdx].coords
+                        row.banishTex:SetTexture("Interface\\TargetingFrame\\UI-RaidTargetingIcons")
+                        row.banishTex:SetTexCoord(c[1], c[2], c[3], c[4])
+                        row.banishLbl:SetText("")
+                    else
+                        row.banishTex:SetTexCoord(0,0,0,0)
+                        row.banishLbl:SetText("|cffaaaaaa-|r")
+                    end
+
+                    curY = curY - SEC_ROW_H
+                else
+                    row.warlockName = nil
+                    row.bg:Hide() row.nameTxt:Hide()
+                    row.curseIcon:Hide() row.curseLbl:Hide()
+                    row.banishBtn:Hide()
+                end
+            end
+        end
+    else
+        f.curseDivider:Hide()
+        f.curseHeader:Hide()
+        for i = 1, 5 do
+            local row = f.warlockRows[i]
+            if row then
+                row.bg:Hide() row.nameTxt:Hide()
+                row.curseIcon:Hide() row.curseLbl:Hide()
+                row.banishBtn:Hide()
+            end
+        end
+    end
+
+    -- Resize
+    local totalH = TITLE_H + HEADER_H + (stoneRows * ROW_H) + 6 + math.abs(curY - baseY)
+    f:SetHeight(totalH)
+end
+
+-------------------------------------------------------------------------------
+-- Curse tracking
+-------------------------------------------------------------------------------
+
+local lastCurseCaster = nil
+
+local SHORT_NAMES = {
+    ["Curse of the Elements"]  = "CoE",
+    ["Curse of Shadow"]        = "CoS",
+    ["Curse of Recklessness"]  = "CoR",
+    ["Curse of Weakness"]      = "CoW",
+}
+
+function m.detectCurse(msg, caster)
+    for fullName, shortName in pairs(SHORT_NAMES) do
+        if string.find(msg, fullName) then
+            local casterName = caster or UnitName("player")
+            -- Only update if:
+            -- 1. This curse has no caster yet, OR
+            -- 2. The same warlock is casting it (already assigned to them), OR
+            -- 3. The caster previously had a different curse (they switched)
+            local existing = m.curses[shortName]
+            local casterPrevCurse = nil
+            for sn, data in pairs(m.curses) do
+                if data.caster == casterName then
+                    casterPrevCurse = sn
+                    break
+                end
+            end
+
+            local shouldUpdate = false
+            if not existing then
+                -- New curse not yet tracked
+                shouldUpdate = true
+            elseif existing.caster == casterName then
+                -- Same warlock recasting same curse - update timestamp only
+                shouldUpdate = true
+            elseif casterPrevCurse and casterPrevCurse ~= shortName then
+                -- Warlock switched to a different curse - remove old, add new
+                m.curses[casterPrevCurse] = nil
+                shouldUpdate = true
+            end
+            -- If another warlock already has this curse slot, don't overwrite
+
+            if shouldUpdate then
+                m.curses[shortName] = { caster = casterName }
+                say((CURSE_COLORS[shortName] or "|cffffffff")..shortName.."|r detected — cast by |cffa050ff"..casterName.."|r")
+                sendGroup("[Curse] "..casterName.." is on "..shortName.." ("..fullName..")")
+                local channel = GetNumRaidMembers() > 0 and "RAID" or (GetNumPartyMembers() > 0 and "PARTY" or nil)
+                if channel then
+                    SendAddonMessage(ADDON_MSG_PREFIX, "CURSE:"..shortName..":"..casterName, channel)
+                end
+                m.refreshBanish()
+            end
+            return true
+        end
+    end
+    return false
+end
+
+function m.removeCurse(msg)
+    for fullName, shortName in pairs(SHORT_NAMES) do
+        if string.find(msg, fullName) then
+            if m.curses[shortName] then
+                m.curses[shortName] = nil
+                m.refresh()
+            end
+            return true
+        end
+    end
+    return false
 end
 
 -------------------------------------------------------------------------------
@@ -711,6 +1080,8 @@ local eFrame = CreateFrame("Frame")
 eFrame:RegisterEvent("PLAYER_LOGIN")
 eFrame:RegisterEvent("PLAYER_LOGOUT")
 eFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
+eFrame:RegisterEvent("PARTY_MEMBERS_CHANGED")
+eFrame:RegisterEvent("RAID_ROSTER_UPDATE")
 eFrame:RegisterEvent("SPELLCAST_START")
 eFrame:RegisterEvent("CHAT_MSG_SPELL_PERIODIC_SELF_BUFFS")
 eFrame:RegisterEvent("CHAT_MSG_SPELL_PERIODIC_FRIENDLYPLAYER_BUFFS")
@@ -718,6 +1089,11 @@ eFrame:RegisterEvent("CHAT_MSG_SPELL_PERIODIC_PARTY_BUFFS")
 eFrame:RegisterEvent("CHAT_MSG_SPELL_AURA_GONE_SELF")
 eFrame:RegisterEvent("CHAT_MSG_SPELL_AURA_GONE_OTHER")
 eFrame:RegisterEvent("CHAT_MSG_COMBAT_FRIENDLY_DEATH")
+eFrame:RegisterEvent("CHAT_MSG_SPELL_HOSTILEPLAYER_BUFF")
+eFrame:RegisterEvent("CHAT_MSG_SPELL_SELF_DAMAGE")
+eFrame:RegisterEvent("CHAT_MSG_SPELL_CREATURE_VS_SELF_DAMAGE")
+eFrame:RegisterEvent("CHAT_MSG_SPELL_DAMAGESHIELDS_SELF")
+eFrame:RegisterEvent("CHAT_MSG_SPELL_PERIODIC_CREATURE_DAMAGE")
 eFrame:RegisterEvent("CHAT_MSG_ADDON")
 
 eFrame:SetScript("OnEvent", function()
@@ -728,6 +1104,7 @@ eFrame:SetScript("OnEvent", function()
         m.createMinimapButton()
         if SoulstoneTrackerDB.hidden then m.frame:Hide() else m.frame:Show() end
         if SoulstoneTrackerDB.locked then m.locked = true m.frame.updateLock() end
+        m.refreshBanish()
         say("Loaded. Type |cffffd700/ss help|r for commands.")
         local t = CreateFrame("Frame") local e = 0
         t:SetScript("OnUpdate", function()
@@ -745,6 +1122,9 @@ eFrame:SetScript("OnEvent", function()
 
     elseif event == "PLAYER_LOGOUT" then
         saveStones()
+
+    elseif event == "PARTY_MEMBERS_CHANGED" or event == "RAID_ROSTER_UPDATE" then
+        m.refreshBanish()
 
     elseif event == "PLAYER_ENTERING_WORLD" then
         if m.frame then
@@ -764,6 +1144,13 @@ eFrame:SetScript("OnEvent", function()
                 SendAddonMessage(ADDON_MSG_PREFIX, "CASTING:"..UnitName("player")..">"..UnitName("target"), "RAID")
             elseif GetNumPartyMembers() > 0 then
                 SendAddonMessage(ADDON_MSG_PREFIX, "CASTING:"..UnitName("player")..">"..UnitName("target"), "PARTY")
+            end
+        end
+        -- Track curse caster (you casting)
+        for fullName in pairs(SHORT_NAMES) do
+            if arg1 and string.find(arg1, fullName) then
+                lastCurseCaster = UnitName("player")
+                break
             end
         end
 
@@ -789,11 +1176,24 @@ eFrame:SetScript("OnEvent", function()
         if arg1 and string.find(arg1, "Soulstone Resurrection") then
             m.removeStone(UnitName("player"))
         end
+        m.removeCurse(arg1 or "")
 
     elseif event == "CHAT_MSG_SPELL_AURA_GONE_OTHER" then
         if arg1 then
             local target = string.match(arg1, "Soulstone Resurrection fades from (.+)%.")
             if target then m.removeStone(target) end
+            m.removeCurse(arg1)
+        end
+
+    elseif event == "CHAT_MSG_SPELL_HOSTILEPLAYER_BUFF"
+        or event == "CHAT_MSG_SPELL_SELF_DAMAGE"
+        or event == "CHAT_MSG_SPELL_CREATURE_VS_SELF_DAMAGE"
+        or event == "CHAT_MSG_SPELL_DAMAGESHIELDS_SELF"
+        or event == "CHAT_MSG_SPELL_PERIODIC_CREATURE_DAMAGE" then
+        if arg1 then
+            -- Default to player name if no caster tracked (solo play)
+            m.detectCurse(arg1, lastCurseCaster or UnitName("player"))
+            lastCurseCaster = nil
         end
 
     elseif event == "CHAT_MSG_COMBAT_FRIENDLY_DEATH" then
@@ -818,6 +1218,23 @@ eFrame:SetScript("OnEvent", function()
             elseif string.find(arg2, "^REM:") then
                 local target = string.match(arg2, "^REM:(.+)$")
                 if target then m.removeStone(target, true) end
+            elseif string.find(arg2, "^BANISH:") then
+                local wName, iconIdx = string.match(arg2, "^BANISH:(.+):(%d+)$")
+                if wName and iconIdx and arg4 ~= UnitName("player") then
+                    local idx = tonumber(iconIdx)
+                    if idx == 0 then
+                        m.banish[wName] = nil
+                    else
+                        m.banish[wName] = idx
+                    end
+                    m.refreshBanish()
+                end
+            elseif string.find(arg2, "^CURSE:") then
+                local shortName, caster = string.match(arg2, "^CURSE:(.+):(.+)$")
+                if shortName and caster and arg4 ~= UnitName("player") then
+                    m.curses[shortName] = { caster=caster }
+                    m.refresh()
+                end
             elseif arg2 == "SYNCREQ" and arg4 ~= UnitName("player") then
                 -- Someone is requesting our stone data - send all our stones
                 local channel = GetNumRaidMembers() > 0 and "RAID" or "PARTY"
@@ -825,6 +1242,14 @@ eFrame:SetScript("OnEvent", function()
                     if data.expires > time() then
                         SendAddonMessage(ADDON_MSG_PREFIX, "ADD:"..target..":"..data.caster..":"..data.expires, channel)
                     end
+                end
+                -- Also sync banish assignments
+                for wName, iconIdx in pairs(m.banish) do
+                    SendAddonMessage(ADDON_MSG_PREFIX, "BANISH:"..wName..":"..iconIdx, channel)
+                end
+                -- Also sync curses
+                for shortName, data in pairs(m.curses) do
+                    SendAddonMessage(ADDON_MSG_PREFIX, "CURSE:"..shortName..":"..data.caster, channel)
                 end
             end
         end
@@ -877,8 +1302,23 @@ SlashCmdList["SOULSTONETRACKER"] = function(args)
         m.frame.updateLock()
         say(m.locked and "Frame locked." or "Frame unlocked.")
 
-    elseif cmd == "scan" then
-        m.scanForSoulstones()
+    elseif cmd == "curses" then
+        local n = 0
+        for shortName, data in pairs(m.curses) do
+            say((CURSE_COLORS[shortName] or "|cffffffff")..shortName.."|r — "..data.caster.." on "..data.target)
+            n = n + 1
+        end
+        if n == 0 then say("No active curses tracked.") end
+
+    elseif cmd == "clearcurses" then
+        m.curses = {}
+        m.refresh()
+        say("Cleared all curse assignments.")
+
+    elseif cmd == "clearbanish" then
+        m.banish = {}
+        m.refreshBanish()
+        say("Cleared all banish assignments.")
         local channel = GetNumRaidMembers() > 0 and "RAID" or (GetNumPartyMembers() > 0 and "PARTY" or nil)
         if channel then
             SendAddonMessage(ADDON_MSG_PREFIX, "SYNCREQ", channel)
@@ -909,7 +1349,8 @@ SlashCmdList["SOULSTONETRACKER"] = function(args)
         say("|cffffd700/ss test 90|r — add test stone with 90 second duration")
         say("|cffffd700/ss clear|r — clear all stones")
         say("|cffffd700/ss list|r — list active stones in chat")
-        say("|cffffd700/ss warlocks|r — show warlocks without stones")
+        say("|cffffd700/ss curses|r — list active curse assignments")
+        say("|cffffd700/ss clearcurses|r — clear curse assignments")
         say("|cffffd700/ss lock|r — toggle frame lock")
         say("|cffffd700/ss scale 0.8|r — resize (0.5-2.0)")
         say("|cffffd700/ss scan|r — scan group for existing stones")
