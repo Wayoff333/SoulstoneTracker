@@ -8,7 +8,7 @@ Tracks Soulstones caster and target, will sync/update if others have the addon i
 
 please let me know if you run into any issues!
 
-<img width="991" height="1030" alt="image" src="https://github.com/user-attachments/assets/7620a267-f98a-4042-a53d-3740177373c5" />
+<img width="995" height="1027" alt="image" src="https://github.com/user-attachments/assets/2e13006e-e6b0-4ad4-87e2-b2180400cd27" />
 V1.2 added settings page cleaned up icons
 
 <img width="525" height="154" alt="image" src="https://github.com/user-attachments/assets/58bb5e21-b24e-474b-9bab-0aa0525883c5" />
