@@ -571,7 +571,7 @@ function m.createFrame()
     local title = titleBar:CreateFontString(nil, "OVERLAY")
     title:SetFont(FONT, 11, "OUTLINE")
     title:SetPoint("Left", titleBar, "Left", 6, 0)
-    title:SetText("|cffffd700Soulstone Tracker v1.0|r")
+    title:SetText("|cffffd700Soulstone Tracker v1.2|r")
     f.title = title
 
     -- Settings button (defined in XML with BLP texture)
@@ -912,7 +912,7 @@ function m.refresh()
     if table.getn(missing) > 0 and (GetNumRaidMembers() > 0 or GetNumPartyMembers() > 0) then
         f.title:SetText("|cffffd700Soulstone Tracker|r |cffff7c0a["..table.getn(missing).." available]|r")
     else
-        f.title:SetText("|cffffd700Soulstone Tracker v1.0|r")
+        f.title:SetText("|cffffd700Soulstone Tracker v1.2|r")
     end
 
     if count == 0 then f.empty:Show() else f.empty:Hide() end

@@ -2,7 +2,7 @@
 ## Title: SoulstoneTracker
 ## Notes: Tracks soulstones on raid members
 ## Author: Waylock
-## Version: 1.0
+## Version: 1.2
 ## SavedVariables: SoulstoneTrackerDB
 
 SoulstoneTracker.xml
