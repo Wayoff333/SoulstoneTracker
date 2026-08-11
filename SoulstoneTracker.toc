@@ -5,4 +5,5 @@
 ## Version: 1.0
 ## SavedVariables: SoulstoneTrackerDB
 
+SoulstoneTracker.xml
 SoulstoneTracker.lua

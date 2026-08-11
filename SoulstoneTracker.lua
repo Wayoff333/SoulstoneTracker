@@ -51,7 +51,53 @@ m.stones   = {}
 m.curses   = {}  -- { shortName = { caster } }
 m.banish   = {}  -- { warlockName = raidIconIndex }
 m.frame    = nil
+m.settings = nil  -- settings panel frame
 m.locked   = false
+m.muted    = false
+
+-- Default settings
+local DEFAULTS = {
+    -- Notifications
+    muteChat         = false,
+    muteSounds       = false,
+    warnOnCast       = true,
+    warnFiveMin      = true,
+    warnOneMin       = true,
+    warnExpired      = true,
+    warnNoStones     = true,
+    warnWarlocks     = true,
+    -- Display
+    showCurseSection  = true,
+    showBanishSection = true,
+    frameAlpha        = 0.95,
+    -- Timing
+    warnMinutes       = 5,   -- first warning threshold in minutes
+    warnSeconds       = 60,  -- second warning threshold in seconds
+    -- Announce
+    announceOnCast   = true,
+    announceExpired  = true,
+    announceWarnings = true,
+    announceCurse    = true,
+    announceBanish   = true,
+}
+
+m.cfg = {}
+
+-------------------------------------------------------------------------------
+-- Config helpers
+-------------------------------------------------------------------------------
+
+local function cfg(key)
+    if m.cfg[key] == nil then return DEFAULTS[key] end
+    return m.cfg[key]
+end
+
+local function setCfg(key, val)
+    m.cfg[key] = val
+    if SoulstoneTrackerDB then
+        SoulstoneTrackerDB.cfg = m.cfg
+    end
+end
 
 -------------------------------------------------------------------------------
 -- Utility
@@ -76,11 +122,16 @@ local function say(msg)
 end
 
 local function sendGroup(msg)
+    if cfg("muteChat") then return end
     if GetNumRaidMembers() > 0 then
         SendChatMessage(msg, "RAID")
     elseif GetNumPartyMembers() > 0 then
         SendChatMessage(msg, "PARTY")
     end
+end
+
+local function playSound(sound)
+    if not cfg("muteSounds") then PlaySound(sound) end
 end
 
 local function hasActiveStones()
@@ -210,9 +261,11 @@ function m.addStone(target, caster, expires, silent)
     m.stones[target] = { caster=caster, expires=exp, castTime=time(), warnedFiveMin=false, warnedOneMin=false }
     if not silent then
         say("|cffa050ff"..caster.."|r soulstoned |cffffffff"..target.."|r")
-        PlaySound("SPELLBOOKCLOSE")
+        if cfg("warnOnCast") then playSound("SPELLBOOKCLOSE") end
         broadcastStone(target, caster, exp)
-        sendGroup("[Soulstone] "..caster.." -> "..target.." (30 min)")
+        if cfg("announceOnCast") then
+            sendGroup("[Soulstone] "..caster.." -> "..target.." (30 min)")
+        end
     end
     m.refresh()
 end
@@ -230,39 +283,55 @@ function m.clearExpired()
     local changed = false
     for target, data in pairs(m.stones) do
         local secs = data.expires - now
-        -- 5 minute warning
-        if not data.warnedFiveMin and secs <= 300 and secs > 0 then
+        -- First warning (configurable, default 5 min)
+        local firstWarnSecs = cfg("warnMinutes") * 60
+        if not data.warnedFiveMin and secs <= firstWarnSecs and secs > 0 then
             data.warnedFiveMin = true
-            say("|cffff7c0a[WARNING]|r Soulstone on |cffffffff"..target.."|r expires in 5 minutes!")
-            PlaySound("RAID_WARNING")
-            sendGroup("[Soulstone] WARNING: "..target.."'s soulstone expires in 5 minutes!")
+            if cfg("warnFiveMin") then
+                say("|cffff7c0a[WARNING]|r Soulstone on |cffffffff"..target.."|r expires in "..cfg("warnMinutes").." minutes!")
+                playSound("RAID_WARNING")
+                if cfg("announceWarnings") then
+                    sendGroup("[Soulstone] WARNING: "..target.."'s soulstone expires in "..cfg("warnMinutes").." minutes!")
+                end
+            end
             m.refresh()
         end
-        -- 1 minute warning
-        if not data.warnedOneMin and secs <= 60 and secs > 0 then
+        -- Second warning (configurable, default 60 sec)
+        local secondWarnSecs = cfg("warnSeconds")
+        if not data.warnedOneMin and secs <= secondWarnSecs and secs > 0 then
             data.warnedOneMin = true
-            say("|cffff3333[WARNING]|r Soulstone on |cffffffff"..target.."|r expires in 1 minute!")
-            PlaySound("RAID_WARNING")
-            sendGroup("[Soulstone] WARNING: "..target.."'s soulstone expires in 1 minute!")
+            if cfg("warnOneMin") then
+                say("|cffff3333[WARNING]|r Soulstone on |cffffffff"..target.."|r expires in "..cfg("warnSeconds").." seconds!")
+                playSound("RAID_WARNING")
+                if cfg("announceWarnings") then
+                    sendGroup("[Soulstone] WARNING: "..target.."'s soulstone expires in "..cfg("warnSeconds").." seconds!")
+                end
+            end
             m.refresh()
         end
         -- Expired
         if now >= data.expires then
-            say("|cffff3333[WARNING]|r Soulstone expired on |cffffffff"..target.."|r")
-            PlaySound("LOOTCLOSE")
-            sendGroup("[Soulstone] "..target.."'s soulstone has expired!")
+            if cfg("warnExpired") then
+                say("|cffff3333[WARNING]|r Soulstone expired on |cffffffff"..target.."|r")
+                playSound("LOOTCLOSE")
+                if cfg("announceExpired") then
+                    sendGroup("[Soulstone] "..target.."'s soulstone has expired!")
+                end
+            end
             m.stones[target] = nil
             changed = true
         end
     end
     if changed then
         m.refresh()
-        if not hasActiveStones() then
+        if not hasActiveStones() and cfg("warnNoStones") then
             say("|cffff3333[WARNING]|r No active soulstones in the raid!")
-            PlaySound("RAID_WARNING")
-            local missing = getWarlocksMissingStones()
-            if table.getn(missing) > 0 then
-                say("|cffff7c0aWarlocks with available SS: |cffffffff"..table.concat(missing, ", ").."|r")
+            playSound("RAID_WARNING")
+            if cfg("warnWarlocks") then
+                local missing = getWarlocksMissingStones()
+                if table.getn(missing) > 0 then
+                    say("|cffff7c0aWarlocks with available SS: |cffffffff"..table.concat(missing, ", ").."|r")
+                end
             end
         end
     end
@@ -412,6 +481,42 @@ end
 -- UI
 -------------------------------------------------------------------------------
 
+StaticPopupDialogs["SOULSTONETRACKER_RELOAD"] = {
+    text = "SoulstoneTracker: some changes need a UI reload to fully apply. Reload now?",
+    button1 = "Reload Now",
+    button2 = "Later",
+    OnAccept = function() ReloadUI() end,
+    timeout = 0,
+    whileDead = true,
+    hideOnEscape = true,
+    preferredIndex = 3,
+}
+
+-- Call this instead of m.settings:Hide() directly whenever the settings
+-- panel is closed, so a pending reload-required change gets flagged.
+function m.closeSettings()
+    if not m.settings then return end
+    m.settings:Hide()
+    if m.settings.needsReload then
+        m.settings.needsReload = false
+        StaticPopup_Show("SOULSTONETRACKER_RELOAD")
+    end
+end
+
+function m.onClose()
+    if m.frame then
+        m.frame:Hide()
+        SoulstoneTrackerDB.hidden = true
+    end
+end
+
+function m.onLockClick()
+    m.locked = not m.locked
+    SoulstoneTrackerDB.locked = m.locked
+    m.frame.updateLock()
+    say(m.locked and "Frame locked." or "Frame unlocked.")
+end
+
 function m.createFrame()
     local savedW = SoulstoneTrackerDB.size and SoulstoneTrackerDB.size.w or BASE_W
     local savedH = SoulstoneTrackerDB.size and SoulstoneTrackerDB.size.h or TITLE_H + HEADER_H + ROW_H + 6
@@ -469,59 +574,36 @@ function m.createFrame()
     title:SetText("|cffffd700Soulstone Tracker v1.0|r")
     f.title = title
 
-    -- Lock button
-    local lockBtn = CreateFrame("Button", nil, titleBar)
-    lockBtn:SetWidth(16)
-    lockBtn:SetHeight(16)
-    lockBtn:SetPoint("Right", titleBar, "Right", -24, 0)
+    -- Settings button (defined in XML with BLP texture)
+    local settingsBtn = _G["SSTSettingsButton"]
+    settingsBtn:SetParent(titleBar)
+    settingsBtn:SetPoint("Right", titleBar, "Right", -42, 0)
+    settingsBtn:Show()
 
-    local lockTex = lockBtn:CreateTexture(nil, "ARTWORK")
-    lockTex:SetAllPoints(lockBtn)
-    lockTex:SetTexture("Interface\\AddOns\\SoulstoneTracker\\images\\icon_unlocked")
+    -- Lock button (defined in XML with BLP texture)
+    local lockBtn = _G["SSTLockButton"]
+    lockBtn:SetParent(titleBar)
+    lockBtn:SetPoint("Right", titleBar, "Right", -24, 0)
+    lockBtn:Show()
+
+    local lockTex = _G["SSTLockButtonNT"]
     f.lockTex = lockTex
 
     local function updateLock()
         if m.locked then
-            f.lockTex:SetTexture("Interface\\AddOns\\SoulstoneTracker\\images\\icon_locked")
+            lockTex:SetTexture("Interface\\addons\\SoulstoneTracker\\images\\icon_locked")
         else
-            f.lockTex:SetTexture("Interface\\AddOns\\SoulstoneTracker\\images\\icon_unlocked")
+            lockTex:SetTexture("Interface\\addons\\SoulstoneTracker\\images\\icon_unlocked")
         end
     end
     updateLock()
     f.updateLock = updateLock
 
-    lockBtn:SetScript("OnEnter", function()
-        GameTooltip:SetOwner(lockBtn, "ANCHOR_BOTTOM")
-        GameTooltip:SetText(m.locked and "Unlock frame" or "Lock frame", 1,1,1)
-        GameTooltip:Show()
-    end)
-    lockBtn:SetScript("OnLeave", function()
-        GameTooltip:Hide()
-    end)
-    lockBtn:SetScript("OnClick", function()
-        m.locked = not m.locked
-        SoulstoneTrackerDB.locked = m.locked
-        updateLock()
-        say(m.locked and "Frame locked." or "Frame unlocked.")
-    end)
-
-    -- X close button
-    local closeBtn = CreateFrame("Button", nil, titleBar)
-    closeBtn:SetWidth(18)
-    closeBtn:SetHeight(18)
+    -- X close button (defined in XML with BLP texture)
+    local closeBtn = _G["SSTCloseButton"]
+    closeBtn:SetParent(titleBar)
     closeBtn:SetPoint("Right", titleBar, "Right", -4, 0)
-    local closeTxt = closeBtn:CreateFontString(nil, "OVERLAY")
-    closeTxt:SetFont(FONT, 13, "OUTLINE")
-    closeTxt:SetAllPoints(closeBtn)
-    closeTxt:SetJustifyH("Center")
-    closeTxt:SetJustifyV("Middle")
-    closeTxt:SetText("|cffaaaaaaX|r")
-    closeBtn:SetScript("OnEnter", function() closeTxt:SetText("|cffffffffX|r") end)
-    closeBtn:SetScript("OnLeave", function() closeTxt:SetText("|cffaaaaaaX|r") end)
-    closeBtn:SetScript("OnClick", function()
-        f:Hide()
-        SoulstoneTrackerDB.hidden = true
-    end)
+    closeBtn:Show()
 
     -- Column headers
     local hY = -(TITLE_H + HEADER_H/2)
@@ -828,7 +910,7 @@ function m.refresh()
 
     local missing = getWarlocksMissingStones()
     if table.getn(missing) > 0 and (GetNumRaidMembers() > 0 or GetNumPartyMembers() > 0) then
-        f.title:SetText("|cffffd700Soulstone Tracker|r |cffff7c0a["..table.getn(missing).." missing]|r")
+        f.title:SetText("|cffffd700Soulstone Tracker|r |cffff7c0a["..table.getn(missing).." available]|r")
     else
         f.title:SetText("|cffffd700Soulstone Tracker v1.0|r")
     end
@@ -919,7 +1001,7 @@ function m.refreshBanish()
         return
     end
 
-    if warlockCount > 0 then
+    if warlockCount > 0 and cfg("showCurseSection") then
         -- Divider
         f.curseDivider:ClearAllPoints()
         f.curseDivider:SetPoint("TopLeft",  f, "TopLeft",  1, curY)
@@ -1057,7 +1139,9 @@ function m.detectCurse(msg, caster)
             if shouldUpdate then
                 m.curses[shortName] = { caster = casterName }
                 say((CURSE_COLORS[shortName] or "|cffffffff")..shortName.."|r detected — cast by |cffa050ff"..casterName.."|r")
-                sendGroup("[Curse] "..casterName.." is on "..shortName.." ("..fullName..")")
+                if cfg("announceCurse") then
+                    sendGroup("[Curse] "..casterName.." is on "..shortName.." ("..fullName..")")
+                end
                 local channel = GetNumRaidMembers() > 0 and "RAID" or (GetNumPartyMembers() > 0 and "PARTY" or nil)
                 if channel then
                     SendAddonMessage(ADDON_MSG_PREFIX, "CURSE:"..shortName..":"..casterName, channel)
@@ -1081,6 +1165,270 @@ function m.removeCurse(msg)
         end
     end
     return false
+end
+
+-------------------------------------------------------------------------------
+-- Settings Panel
+-------------------------------------------------------------------------------
+
+function m.toggleSettings()
+    if m.settings and m.settings:IsVisible() then
+        m.closeSettings()
+        return
+    end
+    if not m.settings then
+        m.createSettings()
+    end
+    m.settings:Show()
+    m.refreshSettings()
+end
+
+function m.createSettings()
+    local SW, SH = 320, 420
+    local s = CreateFrame("Frame", "SoulstoneTrackerSettings", UIParent)
+    s:SetWidth(SW)
+    s:SetHeight(SH)
+    s:SetFrameStrata("HIGH")
+    s:SetBackdrop({
+        bgFile   = "Interface\\Buttons\\WHITE8X8",
+        edgeFile = "Interface\\Buttons\\WHITE8X8",
+        edgeSize = 1,
+        insets   = { left=1, right=1, top=1, bottom=1 }
+    })
+    s:SetBackdropColor(0.05, 0.05, 0.08, 0.98)
+    s:SetBackdropBorderColor(0.4, 0.2, 0.6, 1)
+    s:SetMovable(true)
+    s:EnableMouse(true)
+    s:RegisterForDrag("LeftButton")
+    s:SetScript("OnDragStart", function() this:StartMoving() end)
+    s:SetScript("OnDragStop", function() this:StopMovingOrSizing() end)
+    s:SetClampedToScreen(true)
+
+    -- Position next to main frame
+    if m.frame then
+        s:SetPoint("TopLeft", m.frame, "TopRight", 4, 0)
+    else
+        s:SetPoint("Center", UIParent, "Center", 0, 0)
+    end
+
+    -- Title bar
+    local titleBar = CreateFrame("Frame", nil, s)
+    titleBar:SetPoint("TopLeft",  s, "TopLeft",  1, -1)
+    titleBar:SetPoint("TopRight", s, "TopRight", -1, -1)
+    titleBar:SetHeight(22)
+    titleBar:SetBackdrop({ bgFile = "Interface\\Buttons\\WHITE8X8" })
+    titleBar:SetBackdropColor(0.22, 0.08, 0.38, 1)
+
+    local grad = titleBar:CreateTexture(nil, "OVERLAY")
+    grad:SetAllPoints(titleBar)
+    grad:SetTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight")
+    grad:SetBlendMode("ADD")
+    grad:SetVertexColor(0.2, 0.05, 0.4, 0.4)
+
+    local title = titleBar:CreateFontString(nil, "OVERLAY")
+    title:SetFont("Fonts\\FRIZQT__.TTF", 11, "OUTLINE")
+    title:SetPoint("Left", titleBar, "Left", 6, 0)
+    title:SetText("|cffffd700Soulstone Tracker — Settings|r")
+
+    local closeBtn = CreateFrame("Button", nil, titleBar)
+    closeBtn:SetWidth(18) closeBtn:SetHeight(18)
+    closeBtn:SetPoint("Right", titleBar, "Right", -4, 0)
+    local closeTxt = closeBtn:CreateFontString(nil, "OVERLAY")
+    closeTxt:SetFont("Fonts\\FRIZQT__.TTF", 13, "OUTLINE")
+    closeTxt:SetAllPoints(closeBtn) closeTxt:SetJustifyH("Center") closeTxt:SetJustifyV("Middle")
+    closeTxt:SetText("|cffaaaaaaX|r")
+    closeBtn:SetScript("OnEnter", function() closeTxt:SetText("|cffffffffX|r") end)
+    closeBtn:SetScript("OnLeave", function() closeTxt:SetText("|cffaaaaaaX|r") end)
+    closeBtn:SetScript("OnClick", function() m.closeSettings() end)
+
+    -- Helper to create a toggle checkbox row
+    local function makeToggle(parent, label, key, yOff)
+        local cb = CreateFrame("Button", nil, parent)
+        cb:SetWidth(14) cb:SetHeight(14)
+        cb:SetPoint("TopLeft", parent, "TopLeft", 10, yOff)
+
+        local box = cb:CreateTexture(nil, "ARTWORK")
+        box:SetAllPoints(cb)
+        box:SetTexture("Interface\\Buttons\\WHITE8X8")
+        box:SetVertexColor(0.15, 0.15, 0.2, 1)
+
+        local check = cb:CreateTexture(nil, "OVERLAY")
+        check:SetAllPoints(cb)
+        check:SetTexture("Interface\\Buttons\\UI-CheckBox-Check")
+        check:SetVertexColor(0.6, 0.3, 1, 1)
+
+        local lbl = parent:CreateFontString(nil, "OVERLAY")
+        lbl:SetFont("Fonts\\FRIZQT__.TTF", 10, "OUTLINE")
+        lbl:SetPoint("Left", cb, "Right", 6, 0)
+        lbl:SetText(label)
+        lbl:SetTextColor(0.85, 0.85, 0.85, 1)
+
+        cb.check = check
+        cb.key   = key
+        cb:SetScript("OnClick", function()
+            local cur = cfg(this.key)
+            setCfg(this.key, not cur)
+            if not cur then this.check:Show() else this.check:Hide() end
+            if m.frame then m.refreshBanish() end
+        end)
+        cb:SetScript("OnEnter", function() box:SetVertexColor(0.25, 0.15, 0.35, 1) end)
+        cb:SetScript("OnLeave", function() box:SetVertexColor(0.15, 0.15, 0.2, 1) end)
+
+        return cb
+    end
+
+    -- Helper for section header
+    local function makeHeader(parent, text, yOff)
+        local div = parent:CreateTexture(nil, "ARTWORK")
+        div:SetHeight(1)
+        div:SetPoint("TopLeft",  parent, "TopLeft",  6, yOff)
+        div:SetPoint("TopRight", parent, "TopRight", -6, yOff)
+        div:SetTexture(0.3, 0.15, 0.5, 0.8)
+
+        local hdr = parent:CreateFontString(nil, "OVERLAY")
+        hdr:SetFont("Fonts\\FRIZQT__.TTF", 9, "OUTLINE")
+        hdr:SetTextColor(0.7, 0.5, 1, 1)
+        hdr:SetPoint("TopLeft", parent, "TopLeft", 10, yOff + 5)
+        hdr:SetText(text)
+        return hdr
+    end
+
+    -- Helper for number input
+    local function makeSlider(parent, label, key, minV, maxV, step, yOff)
+        local lbl = parent:CreateFontString(nil, "OVERLAY")
+        lbl:SetFont("Fonts\\FRIZQT__.TTF", 10, "OUTLINE")
+        lbl:SetTextColor(0.85, 0.85, 0.85, 1)
+        lbl:SetPoint("TopLeft", parent, "TopLeft", 10, yOff)
+        lbl:SetText(label)
+
+        local valLbl = parent:CreateFontString(nil, "OVERLAY")
+        valLbl:SetFont("Fonts\\FRIZQT__.TTF", 10, "OUTLINE")
+        valLbl:SetTextColor(0.6, 0.3, 1, 1)
+        valLbl:SetPoint("TopRight", parent, "TopRight", -10, yOff)
+        valLbl:SetJustifyH("Right")
+
+        local sliderName = "SSTracker_Slider_"..key
+        local slider = CreateFrame("Slider", sliderName, parent, "OptionsSliderTemplate")
+        slider:SetWidth(SW - 30)
+        slider:SetHeight(16)
+        slider:SetPoint("TopLeft", parent, "TopLeft", 10, yOff - 14)
+        slider:SetMinMaxValues(minV, maxV)
+        slider:SetValueStep(step)
+        slider:SetValue(cfg(key))
+        getglobal(sliderName.."Low"):SetText(tostring(minV))
+        getglobal(sliderName.."High"):SetText(tostring(maxV))
+        local sliderText = getglobal(sliderName.."Text")
+        sliderText:SetText(tostring(cfg(key)))
+        sliderText:SetFont("Fonts\\FRIZQT__.TTF", 10, "OUTLINE")
+        slider.key = key
+        slider.valLbl = valLbl
+        slider:SetScript("OnValueChanged", function()
+            local v = math.floor(this:GetValue() / step + 0.5) * step
+            setCfg(this.key, v)
+            getglobal(this:GetName().."Text"):SetText(tostring(v))
+            this.valLbl:SetText(tostring(v))
+        end)
+        valLbl:SetText(tostring(cfg(key)))
+        return slider
+    end
+
+    -- Helper for action button
+    local function makeButton(parent, label, onClick, yOff)
+        local btn = CreateFrame("Button", nil, parent)
+        btn:SetWidth(SW - 20) btn:SetHeight(20)
+        btn:SetPoint("TopLeft", parent, "TopLeft", 10, yOff)
+        btn:SetBackdrop({ bgFile="Interface\\Buttons\\WHITE8X8", edgeFile="Interface\\Buttons\\WHITE8X8", edgeSize=1, insets={left=1,right=1,top=1,bottom=1} })
+        btn:SetBackdropColor(0.15, 0.08, 0.25, 1)
+        btn:SetBackdropBorderColor(0.4, 0.2, 0.6, 0.8)
+        local txt = btn:CreateFontString(nil, "OVERLAY")
+        txt:SetFont("Fonts\\FRIZQT__.TTF", 10, "OUTLINE")
+        txt:SetAllPoints(btn) txt:SetJustifyH("Center") txt:SetJustifyV("Middle")
+        txt:SetText(label)
+        txt:SetTextColor(0.85, 0.85, 0.85, 1)
+        btn:SetScript("OnEnter", function() btn:SetBackdropColor(0.25, 0.12, 0.4, 1) end)
+        btn:SetScript("OnLeave", function() btn:SetBackdropColor(0.15, 0.08, 0.25, 1) end)
+        btn:SetScript("OnClick", onClick)
+        return btn
+    end
+
+    -- Store checkboxes for refresh
+    s.checks = {}
+    s.needsReload = false
+    local y = -28
+
+    -- NOTIFICATIONS section
+    makeHeader(s, "NOTIFICATIONS", y) y = y - 14
+    s.checks["warnOnCast"]    = makeToggle(s, "Play sound on soulstone cast",       "warnOnCast",    y) y = y - 18
+    s.checks["warnFiveMin"]   = makeToggle(s, "Warn when soulstone nears expiry",    "warnFiveMin",   y) y = y - 18
+    s.checks["warnOneMin"]    = makeToggle(s, "Warn at final countdown",             "warnOneMin",    y) y = y - 18
+    s.checks["warnExpired"]   = makeToggle(s, "Alert when soulstone expires",        "warnExpired",   y) y = y - 18
+    s.checks["warnNoStones"]  = makeToggle(s, "Alert when no stones remain",         "warnNoStones",  y) y = y - 18
+    s.checks["warnWarlocks"]  = makeToggle(s, "List warlocks with available SS",     "warnWarlocks",  y) y = y - 24
+
+    -- SOUNDS section
+    makeHeader(s, "SOUNDS", y) y = y - 14
+    s.checks["muteSounds"]    = makeToggle(s, "Mute all sounds",                     "muteSounds",    y) y = y - 24
+
+    -- RAID CHAT section
+    makeHeader(s, "RAID CHAT ANNOUNCEMENTS", y) y = y - 14
+    s.checks["muteChat"]         = makeToggle(s, "Mute all raid chat",               "muteChat",         y) y = y - 18
+    s.checks["announceOnCast"]   = makeToggle(s, "Announce soulstone casts",         "announceOnCast",   y) y = y - 18
+    s.checks["announceWarnings"] = makeToggle(s, "Announce expiry warnings",         "announceWarnings", y) y = y - 18
+    s.checks["announceExpired"]  = makeToggle(s, "Announce when stone expires",      "announceExpired",  y) y = y - 18
+    s.checks["announceCurse"]    = makeToggle(s, "Announce curse assignments",       "announceCurse",    y) y = y - 18
+    s.checks["announceBanish"]   = makeToggle(s, "Announce banish assignments",      "announceBanish",   y) y = y - 24
+
+    -- DISPLAY section
+    makeHeader(s, "DISPLAY", y) y = y - 14
+    s.checks["showCurseSection"]  = makeToggle(s, "Show curse & banish section",     "showCurseSection",  y) y = y - 24
+
+    -- TIMING section
+    makeHeader(s, "WARNING THRESHOLDS", y) y = y - 14
+    s.warnMinSlider = makeSlider(s, "First warning (minutes):", "warnMinutes", 1, 15, 1, y) y = y - 36
+    s.warnSecSlider = makeSlider(s, "Final warning (seconds):", "warnSeconds", 15, 120, 5, y) y = y - 40
+
+    -- ACTION BUTTONS
+    makeHeader(s, "ACTIONS", y) y = y - 14
+    makeButton(s, "Clear all soulstones", function()
+        m.stones = {} m.refresh() say("Cleared all soulstones.")
+    end, y) y = y - 26
+    makeButton(s, "Clear curse assignments", function()
+        m.curses = {} m.refreshBanish() say("Cleared curse assignments.")
+    end, y) y = y - 26
+    makeButton(s, "Clear banish assignments", function()
+        m.banish = {} m.refreshBanish() say("Cleared banish assignments.")
+    end, y) y = y - 26
+    makeButton(s, "Scan group for soulstones", function()
+        m.scanForSoulstones()
+    end, y) y = y - 26
+    makeButton(s, "Reset position & size", function()
+        SoulstoneTrackerDB.position = nil
+        SoulstoneTrackerDB.size = nil
+        s.needsReload = true
+        say("Position reset. Reload to apply.")
+    end, y)
+
+    s:SetHeight(math.abs(y) + 30)
+    s:Hide()
+    m.settings = s
+end
+
+function m.refreshSettings()
+    if not m.settings then return end
+    local s = m.settings
+    for key, cb in pairs(s.checks) do
+        if cb.check then
+            if cfg(key) then cb.check:Show() else cb.check:Hide() end
+        end
+    end
+    if s.warnMinSlider then
+        s.warnMinSlider:SetValue(cfg("warnMinutes"))
+        getglobal(s.warnMinSlider:GetName().."Text"):SetText(tostring(cfg("warnMinutes")))
+    end
+    if s.warnSecSlider then
+        s.warnSecSlider:SetValue(cfg("warnSeconds"))
+        getglobal(s.warnSecSlider:GetName().."Text"):SetText(tostring(cfg("warnSeconds")))
+    end
 end
 
 -------------------------------------------------------------------------------
@@ -1112,11 +1460,16 @@ eFrame:RegisterEvent("CHAT_MSG_SPELL_SELF_DAMAGE")
 eFrame:RegisterEvent("CHAT_MSG_SPELL_CREATURE_VS_SELF_DAMAGE")
 eFrame:RegisterEvent("CHAT_MSG_SPELL_DAMAGESHIELDS_SELF")
 eFrame:RegisterEvent("CHAT_MSG_SPELL_PERIODIC_CREATURE_DAMAGE")
+eFrame:RegisterEvent("CHAT_MSG_SPELL_PERIODIC_HOSTILEPLAYER_DAMAGE")
 eFrame:RegisterEvent("CHAT_MSG_ADDON")
 
 eFrame:SetScript("OnEvent", function()
     if event == "PLAYER_LOGIN" then
         SoulstoneTrackerDB = SoulstoneTrackerDB or {}
+        -- Load config
+        if SoulstoneTrackerDB.cfg then
+            m.cfg = SoulstoneTrackerDB.cfg
+        end
         loadAll()
         m.createFrame()
         m.createMinimapButton()
@@ -1207,7 +1560,8 @@ eFrame:SetScript("OnEvent", function()
         or event == "CHAT_MSG_SPELL_SELF_DAMAGE"
         or event == "CHAT_MSG_SPELL_CREATURE_VS_SELF_DAMAGE"
         or event == "CHAT_MSG_SPELL_DAMAGESHIELDS_SELF"
-        or event == "CHAT_MSG_SPELL_PERIODIC_CREATURE_DAMAGE" then
+        or event == "CHAT_MSG_SPELL_PERIODIC_CREATURE_DAMAGE"
+        or event == "CHAT_MSG_SPELL_PERIODIC_HOSTILEPLAYER_DAMAGE" then
         if arg1 then
             -- Default to player name if no caster tracked (solo play)
             m.detectCurse(arg1, lastCurseCaster or UnitName("player"))

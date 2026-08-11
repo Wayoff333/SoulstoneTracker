@@ -1,0 +1,52 @@
+<Ui xmlns="http://www.blizzard.com/wow/ui/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.blizzard.com/wow/ui/ ..\FrameXML\UI.xsd">
+
+    <!-- Settings (cog) button -->
+    <Button name="SSTSettingsButton" inherits="UIPanelButtonTemplate" text="" hidden="true">
+        <Size x="16" y="16"/>
+        <NormalTexture file="Interface\addons\SoulstoneTracker\images\icon_cog"/>
+        <Scripts>
+            <OnClick>
+                SoulstoneTracker.toggleSettings()
+            </OnClick>
+            <OnEnter>
+                GameTooltip:SetOwner(this, "ANCHOR_BOTTOM")
+                GameTooltip:SetText("Settings", 1, 1, 1)
+                GameTooltip:Show()
+            </OnEnter>
+            <OnLeave>
+                GameTooltip:Hide()
+            </OnLeave>
+        </Scripts>
+    </Button>
+
+    <!-- Close (X) button -->
+    <Button name="SSTCloseButton" inherits="UIPanelButtonTemplate" text="" hidden="true">
+        <Size x="16" y="16"/>
+        <NormalTexture file="Interface\addons\SoulstoneTracker\images\icon_x"/>
+        <Scripts>
+            <OnClick>
+                SoulstoneTracker.onClose()
+            </OnClick>
+        </Scripts>
+    </Button>
+
+    <!-- Lock button -->
+    <Button name="SSTLockButton" inherits="UIPanelButtonTemplate" text="" hidden="true">
+        <Size x="16" y="16"/>
+        <NormalTexture name="SSTLockButtonNT" file="Interface\addons\SoulstoneTracker\images\icon_unlocked"/>
+        <Scripts>
+            <OnClick>
+                SoulstoneTracker.onLockClick()
+            </OnClick>
+            <OnEnter>
+                GameTooltip:SetOwner(this, "ANCHOR_BOTTOM")
+                GameTooltip:SetText(SoulstoneTracker.locked and "Unlock frame" or "Lock frame", 1, 1, 1)
+                GameTooltip:Show()
+            </OnEnter>
+            <OnLeave>
+                GameTooltip:Hide()
+            </OnLeave>
+        </Scripts>
+    </Button>
+
+</Ui>
