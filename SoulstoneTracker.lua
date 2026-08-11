@@ -743,6 +743,62 @@ function m.createFrame()
         curseLbl:SetJustifyH("Left")
         curseLbl:Hide()
 
+        -- Curse override button (manual assign/correct, mirrors banish button below)
+        local curseBtn = CreateFrame("Button", "SSWarlockCurse_"..i, f)
+        curseBtn:SetHeight(SEC_ROW_H)
+        curseBtn:SetFrameLevel(f:GetFrameLevel() + 5)
+        curseBtn.rowIndex = i
+
+        curseBtn:SetScript("OnEnter", function()
+            local row = f.warlockRows[this.rowIndex]
+            if not row or not row.warlockName then return end
+            GameTooltip:SetOwner(curseBtn, "ANCHOR_LEFT")
+            GameTooltip:SetText(row.warlockName, 0.6, 0.3, 1)
+            local shortName = nil
+            for sn, data in pairs(m.curses) do
+                if data.caster == row.warlockName then shortName = sn break end
+            end
+            GameTooltip:AddLine(shortName and ("Curse: "..shortName) or "No curse detected", 1,1,0)
+            GameTooltip:AddLine("Click to manually set/correct", 0.7,0.7,0.7)
+            GameTooltip:Show()
+        end)
+        curseBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        curseBtn:SetScript("OnClick", function()
+            local row = f.warlockRows[this.rowIndex]
+            if not row or not row.warlockName then return end
+            local wName = row.warlockName
+            local menu = CreateFrame("Frame", "SSWarlockCurseMenu_"..this.rowIndex, UIParent, "UIDropDownMenuTemplate")
+            UIDropDownMenu_Initialize(menu, function()
+                local none = { text="-- None --", notCheckable=true }
+                none.func = function()
+                    for sn, data in pairs(m.curses) do
+                        if data.caster == wName then m.curses[sn] = nil end
+                    end
+                    m.refresh()
+                    say("Cleared curse assignment for "..wName..".")
+                end
+                UIDropDownMenu_AddButton(none)
+                for fullName, shortName in pairs(CURSES) do
+                    local ci = { text=fullName.." ("..shortName..")", notCheckable=true, arg1=shortName }
+                    ci.func = function(sn)
+                        -- Remove wName from any other curse slot first
+                        for sn2, data in pairs(m.curses) do
+                            if data.caster == wName and sn2 ~= sn then m.curses[sn2] = nil end
+                        end
+                        m.curses[sn] = { caster = wName }
+                        m.refresh()
+                        local msg = "[Curse] "..wName.." -> "..sn.." (manual override)"
+                        say(msg)
+                        local ch = GetNumRaidMembers()>0 and "RAID" or (GetNumPartyMembers()>0 and "PARTY" or nil)
+                        if ch then SendAddonMessage(ADDON_MSG_PREFIX, "CURSE:"..sn..":"..wName, ch) end
+                    end
+                    UIDropDownMenu_AddButton(ci)
+                end
+            end, "MENU")
+            ToggleDropDownMenu(1, nil, menu, "cursor", 0, 0)
+        end)
+        curseBtn:Hide()
+
         -- Banish icon button
         local banishBtn = CreateFrame("Button", "SSWarlockBanish_"..i, f)
         banishBtn:SetWidth(16)
@@ -807,7 +863,7 @@ function m.createFrame()
         banishBtn:Hide()
 
         f.warlockRows[i] = {
-            bg=bg, nameTxt=nameTxt, curseIcon=curseIcon, curseLbl=curseLbl,
+            bg=bg, nameTxt=nameTxt, curseIcon=curseIcon, curseLbl=curseLbl, curseBtn=curseBtn,
             banishBtn=banishBtn, banishTex=banishTex, banishLbl=banishLbl,
             warlockName=nil
         }
@@ -1047,8 +1103,17 @@ function m.refreshBanish()
                         row.curseLbl:Show()
                     else
                         row.curseIcon:Hide()
-                        row.curseLbl:Hide()
+                        row.curseLbl:ClearAllPoints()
+                        row.curseLbl:SetPoint("TopLeft", f, "TopLeft", math.floor(f:GetWidth() * 0.45), curY - 2)
+                        row.curseLbl:SetText("|cff666666-|r")
+                        row.curseLbl:Show()
                     end
+
+                    -- Curse override hitbox (covers icon+label area, click to manually set)
+                    row.curseBtn:ClearAllPoints()
+                    row.curseBtn:SetPoint("TopLeft", f, "TopLeft", math.floor(f:GetWidth() * 0.45) - 2, curY - 2)
+                    row.curseBtn:SetWidth(48)
+                    row.curseBtn:Show()
 
                     -- Banish icon button (right side, moved in from edge)
                     row.banishBtn:ClearAllPoints()
@@ -1069,7 +1134,7 @@ function m.refreshBanish()
                 else
                     row.warlockName = nil
                     row.bg:Hide() row.nameTxt:Hide()
-                    row.curseIcon:Hide() row.curseLbl:Hide()
+                    row.curseIcon:Hide() row.curseLbl:Hide() row.curseBtn:Hide()
                     row.banishBtn:Hide()
                 end
             end
@@ -1081,7 +1146,7 @@ function m.refreshBanish()
             local row = f.warlockRows[i]
             if row then
                 row.bg:Hide() row.nameTxt:Hide()
-                row.curseIcon:Hide() row.curseLbl:Hide()
+                row.curseIcon:Hide() row.curseLbl:Hide() row.curseBtn:Hide()
                 row.banishBtn:Hide()
             end
         end
@@ -1641,6 +1706,45 @@ SlashCmdList["SOULSTONETRACKER"] = function(args)
     if cmd == "clear" then
         m.stones = {} m.refresh() say("Cleared all soulstones.")
 
+    elseif string.find(cmd, "^testcurse") then
+        local sn, caster = string.match(args, "%a+%s+(%a+)%s*(%a*)")
+        sn = sn or "CoE"
+        local CURSE_LOOKUP = { coe="CoE", cos="CoS", cor="CoR", cow="CoW" }
+        sn = CURSE_LOOKUP[string.lower(sn)] or sn
+        if not CURSE_COLORS[sn] then
+            say("Unknown curse short name |cffffffff"..sn.."|r. Use one of: |cffffd700CoE, CoS, CoR, CoW|r")
+        else
+            caster = (caster ~= "" and caster) or UnitName("player")
+            -- Injects directly into m.curses exactly like the CHAT_MSG_ADDON
+            -- "CURSE:" receive-branch does, to simulate a sync arriving from
+            -- another player without needing a second client.
+            m.curses[sn] = { caster = caster }
+            m.refresh()
+            say("Simulated sync: |cffa050ff"..caster.."|r -> "..(CURSE_COLORS[sn] or "|cffffffff")..sn.."|r (as if received from another player)")
+            -- The curse/banish section only draws a row for your own name or
+            -- an actual Warlock currently in your raid/party, so a made-up
+            -- name won't visibly appear even though it's tracked internally.
+            if caster ~= UnitName("player") then
+                local isRealWarlock = false
+                local numRaid = GetNumRaidMembers()
+                if numRaid > 0 then
+                    for i = 1, numRaid do
+                        local n, _, _, _, class = GetRaidRosterInfo(i)
+                        if n == caster and class == "Warlock" then isRealWarlock = true break end
+                    end
+                else
+                    for i = 1, GetNumPartyMembers() do
+                        if UnitName("party"..i) == caster and UnitClass("party"..i) == "Warlock" then
+                            isRealWarlock = true break
+                        end
+                    end
+                end
+                if not isRealWarlock then
+                    say("|cffff7c0aNote:|r "..caster.." isn't a Warlock in your current group, so no row will show for them. Use your own name or an actual grouped warlock to see it rendered.")
+                end
+            end
+        end
+
     elseif string.find(cmd, "^test") then
         local secs = string.match(cmd, "test%s+(%d+)")
         local duration = tonumber(secs) or (30 * 60)
@@ -1722,6 +1826,7 @@ SlashCmdList["SOULSTONETRACKER"] = function(args)
         say("|cffffd700/ss clear|r — clear all stones")
         say("|cffffd700/ss list|r — list active stones in chat")
         say("|cffffd700/ss curses|r — list active curse assignments")
+        say("|cffffd700/ss testcurse CoE Bob|r — simulate a curse sync from 'Bob' (CoE/CoS/CoR/CoW)")
         say("|cffffd700/ss clearcurses|r — clear curse assignments")
         say("|cffffd700/ss lock|r — toggle frame lock")
         say("|cffffd700/ss scale 0.8|r — resize (0.5-2.0)")
