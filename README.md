@@ -1,6 +1,8 @@
 
 Made for Octowow
 
+REQUIRES NAMPOWER https://github.com/Emyrk/nampower
+
 Sync with other warlocks may/may not be working right now, needs further testing
 use /ss help for commands
 
