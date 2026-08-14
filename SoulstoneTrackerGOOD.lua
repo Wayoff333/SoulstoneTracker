@@ -6,9 +6,6 @@ SoulstoneTracker = {}
 local m = SoulstoneTracker
 
 local SOULSTONE_DURATION = 30 * 60
--- Soulstone Resurrection spellID, confirmed live via BUFF_ADDED_OTHER
--- (nampower) during actual testing.
-local SOULSTONE_SPELL_ID = 20765
 local FONT      = "Fonts\\FRIZQT__.TTF"
 local BASE_W    = 380
 local ROW_H     = 18
@@ -592,25 +589,15 @@ function m.createFrame()
     scanTex:SetAllPoints(scanBtn)
     scanTex:SetTexture("Interface\\Icons\\INV_Misc_Spyglass_03")
     scanTex:SetTexCoord(0.08, 0.92, 0.08, 0.92)
-    -- Try to flatten the shaded item-icon look toward the other buttons'
-    -- flat/vector style. Guarded since SetDesaturated may not exist on
-    -- this client.
-    if scanTex.SetDesaturated then
-        scanTex:SetDesaturated(true)
-    end
-    -- Muted teal/grey to match the lock/settings icons' palette instead of
-    -- the spyglass's default full-color item-icon look.
-    scanTex:SetVertexColor(0.75, 0.85, 0.85)
     scanBtn:SetScript("OnEnter", function()
         GameTooltip:SetOwner(scanBtn, "ANCHOR_LEFT")
         GameTooltip:SetText("Scan for existing soulstones")
         GameTooltip:Show()
-        -- Same gold accent used for the title text elsewhere in the addon.
-        scanTex:SetVertexColor(1, 0.84, 0)
+        scanTex:SetVertexColor(1, 1, 0.6)
     end)
     scanBtn:SetScript("OnLeave", function()
         GameTooltip:Hide()
-        scanTex:SetVertexColor(0.75, 0.85, 0.85)
+        scanTex:SetVertexColor(1, 1, 1)
     end)
     scanBtn:SetScript("OnClick", function()
         m.scanForSoulstones()
@@ -807,12 +794,8 @@ function m.createFrame()
             UIDropDownMenu_Initialize(menu, function()
                 local none = { text="-- None --", notCheckable=true }
                 none.func = function()
-                    local ch = GetNumRaidMembers()>0 and "RAID" or (GetNumPartyMembers()>0 and "PARTY" or nil)
                     for sn, data in pairs(m.curses) do
-                        if data.caster == wName then
-                            m.curses[sn] = nil
-                            if ch then SendAddonMessage(ADDON_MSG_PREFIX, "CURSEREM:"..sn, ch) end
-                        end
+                        if data.caster == wName then m.curses[sn] = nil end
                     end
                     m.refresh()
                     say("Cleared curse assignment for "..wName..".")
@@ -821,20 +804,15 @@ function m.createFrame()
                 for fullName, shortName in pairs(CURSES) do
                     local ci = { text=fullName.." ("..shortName..")", notCheckable=true, arg1=shortName }
                     ci.func = function(sn)
-                        local ch = GetNumRaidMembers()>0 and "RAID" or (GetNumPartyMembers()>0 and "PARTY" or nil)
-                        -- Remove wName from any other curse slot first, and
-                        -- broadcast that removal so other clients don't keep
-                        -- a stale entry for the superseded curse.
+                        -- Remove wName from any other curse slot first
                         for sn2, data in pairs(m.curses) do
-                            if data.caster == wName and sn2 ~= sn then
-                                m.curses[sn2] = nil
-                                if ch then SendAddonMessage(ADDON_MSG_PREFIX, "CURSEREM:"..sn2, ch) end
-                            end
+                            if data.caster == wName and sn2 ~= sn then m.curses[sn2] = nil end
                         end
                         m.curses[sn] = { caster = wName }
                         m.refresh()
                         local msg = "[Curse] "..wName.." -> "..sn.." (manual override)"
                         say(msg)
+                        local ch = GetNumRaidMembers()>0 and "RAID" or (GetNumPartyMembers()>0 and "PARTY" or nil)
                         if ch then SendAddonMessage(ADDON_MSG_PREFIX, "CURSE:"..sn..":"..wName, ch) end
                     end
                     UIDropDownMenu_AddButton(ci)
@@ -1637,16 +1615,6 @@ eFrame:RegisterEvent("CHAT_MSG_ADDON")
 local hasNampower = (GetNampowerVersion ~= nil)
 if hasNampower then
     eFrame:RegisterEvent("SPELL_GO_SELF")
-    eFrame:RegisterEvent("AURA_CAST_ON_OTHER")
-    eFrame:RegisterEvent("AURA_CAST_ON_SELF")
-    -- Unlike SPELL_GO_SELF, aura cast events default to OFF and must be
-    -- explicitly enabled via this CVar.
-    SetCVar("NP_EnableAuraCastEvents", 1)
-    -- Fallback for auras without a spell effect component (which
-    -- AURA_CAST_ON_OTHER/SELF won't catch) -- Soulstone Resurrection may be
-    -- one of these, per nampower's own docs.
-    eFrame:RegisterEvent("BUFF_ADDED_SELF")
-    eFrame:RegisterEvent("BUFF_ADDED_OTHER")
 end
 
 eFrame:SetScript("OnEvent", function()
@@ -1753,15 +1721,10 @@ eFrame:SetScript("OnEvent", function()
 
     elseif event == "CHAT_MSG_SPELL_PERIODIC_FRIENDLYPLAYER_BUFFS"
         or event == "CHAT_MSG_SPELL_PERIODIC_PARTY_BUFFS" then
-        -- "Playername gains Soulstone Resurrection (1)." -- fallback for
-        -- when BUFF_ADDED_OTHER doesn't fire/isn't available; usually
-        -- already a no-op since lastCaster gets consumed by BUFF_ADDED_OTHER
-        -- first when it fires.
+        -- "Playername gains Soulstone Resurrection (1)."
         if arg1 then
-            local suffix = " gains Soulstone Resurrection"
-            local pos = string.find(arg1, suffix, 1, true)
-            local target = pos and string.sub(arg1, 1, pos - 1)
-            if target and target ~= "" and lastCaster then
+            local target = string.match(arg1, "(.+) gains Soulstone Resurrection")
+            if target and lastCaster then
                 m.addStone(target, lastCaster)
                 lastCaster = nil
             end
@@ -1788,42 +1751,6 @@ eFrame:SetScript("OnEvent", function()
             -- Guaranteed self-scoped by nampower, so always safe to
             -- attribute directly to the local player.
             m.detectCurse(FULL_NAMES[shortName], UnitName("player"))
-        end
-
-    elseif event == "AURA_CAST_ON_OTHER" or event == "AURA_CAST_ON_SELF" then
-        -- spellId, casterGuid, targetGuid, effect, effectAuraName, effectAmplitude, effectMiscValue, durationMs, auraCapStatus
-        if m.diagAura then
-            local targetName = UnitName(arg3) or tostring(arg3)
-            say("|cff00ff00[DIAG]|r "..event..": spellId="..tostring(arg1).." target="..tostring(targetName).." durationMs="..tostring(arg8))
-        end
-
-    elseif event == "BUFF_ADDED_SELF" then
-        -- guid, slot, spellId, stackCount, casterLevel (confirmed via live
-        -- testing: casterLevel matched Waylock's actual level of 60).
-        -- Precise soulstone detection: only trusted when we're already
-        -- confident WE are the one mid-cast (lastCaster set via our own
-        -- SPELLCAST_START) -- this event alone doesn't tell us who cast it,
-        -- so blindly trusting it would reintroduce the same cross-warlock
-        -- misattribution risk we already fixed for curses.
-        if arg3 == SOULSTONE_SPELL_ID and lastCaster then
-            m.addStone(UnitName("player"), lastCaster, time() + SOULSTONE_DURATION)
-            lastCaster = nil
-        end
-        if m.diagAura then
-            say("|cff00ff00[DIAG]|r BUFF_ADDED_SELF: a1="..tostring(arg1).." a2="..tostring(arg2).." a3="..tostring(arg3).." a4="..tostring(arg4).." a5="..tostring(arg5))
-        end
-
-    elseif event == "BUFF_ADDED_OTHER" then
-        -- guid, slot, spellId, stackCount, casterLevel
-        if arg3 == SOULSTONE_SPELL_ID and lastCaster then
-            local targetName = UnitName(arg1)
-            if targetName then
-                m.addStone(targetName, lastCaster, time() + SOULSTONE_DURATION)
-                lastCaster = nil
-            end
-        end
-        if m.diagAura then
-            say("|cff00ff00[DIAG]|r BUFF_ADDED_OTHER: a1="..tostring(arg1).." a2="..tostring(arg2).." a3="..tostring(arg3).." a4="..tostring(arg4).." a5="..tostring(arg5))
         end
 
     elseif event == "CHAT_MSG_SPELL_HOSTILEPLAYER_BUFF"
@@ -2021,42 +1948,35 @@ SlashCmdList["SOULSTONETRACKER"] = function(args)
             say("|cffff7c0aMissing: |cffffffff"..table.concat(missing, ", ").."|r")
         end
 
-    elseif string.find(cmd, "^diag") then
-        local spacePos = string.find(cmd, " ", 1, true)
-        local sub = spacePos and string.sub(cmd, spacePos + 1)
-        if sub == "aura" then
-            m.diagAura = not m.diagAura
-            say("Aura-cast diagnostic "..(m.diagAura and "|cff00ff00ENABLED|r" or "|cffff0000DISABLED|r")..". Cast/receive anything to see spellId/target/durationMs in chat.")
+    elseif cmd == "diag" then
+        -- On-demand diagnostic: reveal exact string contents (including
+        -- hidden whitespace or realm suffixes) of both the roster-derived
+        -- warlock names and the synced curse caster names, since they can
+        -- look identical on screen but fail an exact string match in code.
+        local playerName = UnitName("player")
+        say("|cff00ff00[DIAG]|r player = "..string.format("%q", playerName))
+        local numRaid = GetNumRaidMembers()
+        if numRaid > 0 then
+            for i = 1, numRaid do
+                local name, _, _, _, class = GetRaidRosterInfo(i)
+                if name and class == "Warlock" then
+                    say("|cff00ff00[DIAG]|r roster warlock = "..string.format("%q", name))
+                end
+            end
         else
-            -- On-demand diagnostic: reveal exact string contents (including
-            -- hidden whitespace or realm suffixes) of both the roster-derived
-            -- warlock names and the synced curse caster names, since they can
-            -- look identical on screen but fail an exact string match in code.
-            local playerName = UnitName("player")
-            say("|cff00ff00[DIAG]|r player = "..string.format("%q", playerName))
-            local numRaid = GetNumRaidMembers()
-            if numRaid > 0 then
-                for i = 1, numRaid do
-                    local name, _, _, _, class = GetRaidRosterInfo(i)
-                    if name and class == "Warlock" then
-                        say("|cff00ff00[DIAG]|r roster warlock = "..string.format("%q", name))
-                    end
-                end
-            else
-                for i = 1, GetNumPartyMembers() do
-                    local name = UnitName("party"..i)
-                    if name and UnitClass("party"..i) == "Warlock" then
-                        say("|cff00ff00[DIAG]|r roster warlock = "..string.format("%q", name))
-                    end
+            for i = 1, GetNumPartyMembers() do
+                local name = UnitName("party"..i)
+                if name and UnitClass("party"..i) == "Warlock" then
+                    say("|cff00ff00[DIAG]|r roster warlock = "..string.format("%q", name))
                 end
             end
-            local any = false
-            for sn, data in pairs(m.curses) do
-                any = true
-                say("|cff00ff00[DIAG]|r m.curses["..sn.."].caster = "..string.format("%q", data.caster or "nil"))
-            end
-            if not any then say("|cff00ff00[DIAG]|r m.curses is empty") end
         end
+        local any = false
+        for sn, data in pairs(m.curses) do
+            any = true
+            say("|cff00ff00[DIAG]|r m.curses["..sn.."].caster = "..string.format("%q", data.caster or "nil"))
+        end
+        if not any then say("|cff00ff00[DIAG]|r m.curses is empty") end
 
     elseif cmd == "lock" then
         m.locked = not m.locked
@@ -2118,7 +2038,6 @@ SlashCmdList["SOULSTONETRACKER"] = function(args)
         say("|cffffd700/ss lock|r — toggle frame lock")
         say("|cffffd700/ss scale 0.8|r — resize (0.5-2.0)")
         say("|cffffd700/ss scan|r — scan group for existing stones")
-        say("|cffffd700/ss diag aura|r — toggle live aura-cast spellId/duration diagnostic")
         say("|cffffd700/ss reset|r — reset position and size")
 
     else
