@@ -35,6 +35,13 @@ local CURSE_COLORS = {
     ["CoR"] = "|cffff3333",  -- Red
     ["CoW"] = "|cff00cc44",  -- Green
 }
+-- Curse icons - exact paths verified from GetSpellTexture in-game
+local CURSE_ICONS = {
+    ["CoE"] = "Interface\\Icons\\Spell_Shadow_ChillTouch",        -- Curse of the Elements
+    ["CoS"] = "Interface\\Icons\\Spell_Shadow_CurseOfAchimonde",  -- Curse of Shadow
+    ["CoR"] = "Interface\\Icons\\Spell_Shadow_UnholyStrength",    -- Curse of Recklessness
+    ["CoW"] = "Interface\\Icons\\Spell_Shadow_CurseOfMannoroth",  -- Curse of Weakness
+}
 local CURSE_DIVIDER_H = 14
 local CURSE_ROW_H     = 16
 
@@ -53,6 +60,8 @@ local RAID_ICONS = {
 m.stones   = {}
 m.curses   = {}  -- { shortName = { caster } }
 m.banish   = {}  -- { warlockName = raidIconIndex }
+m.shardCounts = {} -- { warlockName = count }
+m.history = {} -- { {text=..., time=...}, ... } session-only log
 m.frame    = nil
 m.settings = nil  -- settings panel frame
 m.locked   = false
@@ -122,6 +131,39 @@ end
 
 local function say(msg)
     DEFAULT_CHAT_FRAME:AddMessage("|cffa050ff[SS]|r " .. msg)
+end
+
+-- Look up a name's class from raid/party/player roster and return the name
+-- wrapped in that class's color code. Falls back to defaultColorCode (a
+-- hex string like "|cffa050ff") if the class can't be determined (e.g. an
+-- "Unknown" caster from a scan, or someone who's left the group).
+local function classColorName(name, defaultColorCode)
+    local class = nil
+    if name == UnitName("player") then
+        local _, c = UnitClass("player")
+        class = c
+    else
+        local numRaid = GetNumRaidMembers()
+        if numRaid > 0 then
+            for i = 1, numRaid do
+                local n, _, _, _, c = GetRaidRosterInfo(i)
+                if n == name then class = c break end
+            end
+        else
+            for i = 1, GetNumPartyMembers() do
+                if UnitName("party"..i) == name then
+                    local _, c = UnitClass("party"..i)
+                    class = c
+                    break
+                end
+            end
+        end
+    end
+    if class and RAID_CLASS_COLORS[class] then
+        local c = RAID_CLASS_COLORS[class]
+        return string.format("|cff%02x%02x%02x", c.r*255, c.g*255, c.b*255)..name.."|r"
+    end
+    return (defaultColorCode or "|cffffffff")..name.."|r"
 end
 
 local function sendGroup(msg)
@@ -269,6 +311,7 @@ function m.addStone(target, caster, expires, silent, unknownExpiry)
         if cfg("announceOnCast") then
             sendGroup("[Soulstone] "..caster.." -> "..target.." (30 min)")
         end
+        m.logHistory(caster.." soulstoned "..target)
     end
     m.refresh()
 end
@@ -376,6 +419,112 @@ function m.scanForSoulstones(silent)
         m.refresh()
     elseif not silent then
         say("No soulstones found on group members.")
+    end
+end
+
+-- Rebroadcasts everything we confidently know (soulstones, banish
+-- assignments, curses) to the group. Used both when responding to someone
+-- else's SYNCREQ, and as the basis for a manual force-resync.
+-- Counts Soul Shards in the local player's bags by matching the item's
+-- icon texture (same robust substring approach used for soulstone/curse
+-- detection, rather than relying on item-ID APIs that may not exist here).
+function m.countShards()
+    local count = 0
+    for bag = 0, 4 do
+        local slots = GetContainerNumSlots(bag)
+        if slots and slots > 0 then
+            for slot = 1, slots do
+                local texture, itemCount = GetContainerItemInfo(bag, slot)
+                if texture and string.find(texture, "INV_Misc_Gem_Amethyst_02", 1, true) then
+                    count = count + (itemCount or 1)
+                end
+            end
+        end
+    end
+    return count
+end
+
+-- Rescans and broadcasts our own shard count if it changed since last
+-- broadcast, so we don't spam the addon channel on every bag update.
+local lastBroadcastShardCount = nil
+function m.updateAndBroadcastShards()
+    local count = m.countShards()
+    m.shardCounts[UnitName("player")] = count
+    if count ~= lastBroadcastShardCount then
+        lastBroadcastShardCount = count
+        local channel = GetNumRaidMembers() > 0 and "RAID" or (GetNumPartyMembers() > 0 and "PARTY" or nil)
+        if channel then
+            SendAddonMessage(ADDON_MSG_PREFIX, "SHARDS:"..count, channel)
+        end
+    end
+    m.refreshBanish()
+end
+
+-- Session-only log of "who stoned who, when" and curse/banish assignments,
+-- for answering "did I get stoned tonight" type questions after a wipe.
+function m.logHistory(text)
+    table.insert(m.history, { text = text, time = time() })
+    -- Cap growth over a long session
+    if table.getn(m.history) > 100 then
+        table.remove(m.history, 1)
+    end
+end
+
+function m.rebroadcastKnownData()
+    local channel = GetNumRaidMembers() > 0 and "RAID" or (GetNumPartyMembers() > 0 and "PARTY" or nil)
+    if not channel then return end
+    -- Skip our own uncertain scanned entries -- those shouldn't propagate
+    -- and risk overwriting someone else's accurate value with a guess.
+    for target, data in pairs(m.stones) do
+        if data.expires > time() and not data.unknownExpiry then
+            SendAddonMessage(ADDON_MSG_PREFIX, "ADD:"..target..":"..data.caster..":"..data.expires, channel)
+        end
+    end
+    for wName, iconIdx in pairs(m.banish) do
+        SendAddonMessage(ADDON_MSG_PREFIX, "BANISH:"..wName..":"..iconIdx, channel)
+    end
+    for shortName, data in pairs(m.curses) do
+        if data.caster ~= "Unknown" then
+            SendAddonMessage(ADDON_MSG_PREFIX, "CURSE:"..shortName..":"..data.caster, channel)
+        end
+    end
+end
+
+function m.scanForCurses(silent)
+    if not UnitExists("target") then
+        if not silent then say("No target selected -- target the mob you want to check.") end
+        return
+    end
+    -- Match on just the icon filename portion (e.g. "ChillTouch"), same
+    -- robust substring approach already used for soulstone texture
+    -- detection, rather than requiring an exact full-path match.
+    local CURSE_ICON_NAMES = {
+        ["CoE"] = "ChillTouch",
+        ["CoS"] = "CurseOfAchimonde",
+        ["CoR"] = "UnholyStrength",
+        ["CoW"] = "CurseOfMannoroth",
+    }
+    local found = 0
+    local i = 1
+    while true do
+        local tex = UnitDebuff("target", i)
+        if not tex then break end
+        for shortName, iconName in pairs(CURSE_ICON_NAMES) do
+            if string.find(tex, iconName, 1, true) then
+                -- Don't overwrite a confidently-known caster with a guess
+                if not m.curses[shortName] or m.curses[shortName].caster == "Unknown" then
+                    m.curses[shortName] = { caster = "Unknown" }
+                    found = found + 1
+                end
+            end
+        end
+        i = i + 1
+    end
+    if found > 0 then
+        say("Found "..found.." existing curse(s) on your target (caster unknown).")
+        m.refreshBanish()
+    elseif not silent then
+        say("No curses found on your target.")
     end
 end
 
@@ -753,6 +902,16 @@ function m.createFrame()
     warlockHdr:SetText("CURSE AND BANISH ASSIGNMENT")
     f.curseHeader = warlockHdr
 
+    -- Footer line for curses found via target-scan whose caster is unknown
+    -- (e.g. cast by a warlock not running the addon) -- these don't fit the
+    -- per-warlock row display since there's no known warlock to attach them
+    -- to, so they get a small summary line instead.
+    local unknownCurseLine = f:CreateFontString(nil, "OVERLAY")
+    unknownCurseLine:SetFont(FONT, 9, "OUTLINE")
+    unknownCurseLine:SetTextColor(0.7, 0.7, 0.7, 1)
+    unknownCurseLine:Hide()
+    f.unknownCurseLine = unknownCurseLine
+
     -- One row per warlock (up to 5), shows: Name | CurseIcon | BanishIcon
     f.warlockRows = {}
     for i = 1, 5 do
@@ -897,6 +1056,7 @@ function m.createFrame()
                         m.refreshBanish()
                         local msg = "[Banish] "..wName.." -> "..RAID_ICONS[iconIdx].name
                         say(msg)
+                        m.logHistory(wName.." assigned banish: "..RAID_ICONS[iconIdx].name)
                         local ch = GetNumRaidMembers()>0 and "RAID" or (GetNumPartyMembers()>0 and "PARTY" or nil)
                         if ch then sendGroup(msg) SendAddonMessage(ADDON_MSG_PREFIX, "BANISH:"..wName..":"..iconIdx, ch) end
                     end
@@ -1022,9 +1182,9 @@ function m.refresh()
         local row  = f.rows[i]
         local data = list[i]
         if data then
-            row.caster:SetText("|cffa050ff"..data.caster.."|r")
+            row.caster:SetText(classColorName(data.caster, "|cffa050ff"))
             row.arrow:SetText("->")
-            row.target:SetText("|cffffffff"..data.target.."|r")
+            row.target:SetText(classColorName(data.target, "|cffffffff"))
             if data.unknownExpiry then
                 row.timer:SetText("|cff888888~"..formatTime(timeLeft(data.expires)).." ?|r")
             else
@@ -1053,13 +1213,6 @@ function m.refreshBanish()
     local SEC_ROW_H = 18
     local HEADER_H2 = 10
 
-    -- Curse icons - exact paths verified from GetSpellTexture in-game
-    local CURSE_ICONS = {
-        ["CoE"] = "Interface\\Icons\\Spell_Shadow_ChillTouch",        -- Curse of the Elements
-        ["CoS"] = "Interface\\Icons\\Spell_Shadow_CurseOfAchimonde",  -- Curse of Shadow
-        ["CoR"] = "Interface\\Icons\\Spell_Shadow_UnholyStrength",    -- Curse of Recklessness
-        ["CoW"] = "Interface\\Icons\\Spell_Shadow_CurseOfMannoroth",  -- Curse of Weakness
-    }
     local FALLBACK_ICON = "Interface\\Icons\\Spell_Shadow_UnholyStrength"
 
     -- Build warlock list
@@ -1135,7 +1288,11 @@ function m.refreshBanish()
                     row.nameTxt:ClearAllPoints()
                     row.nameTxt:SetPoint("TopLeft", f, "TopLeft", 8, curY - 2)
                     row.nameTxt:SetWidth(f:GetWidth() * 0.5)
-                    row.nameTxt:SetText("|cffa050ff"..wName.."|r")
+                    local nameStr = classColorName(wName, "|cffa050ff")
+                    if m.shardCounts[wName] then
+                        nameStr = nameStr.." |cffcc66ff("..m.shardCounts[wName]..")|r"
+                    end
+                    row.nameTxt:SetText(nameStr)
                     row.nameTxt:Show()
 
                     -- Curse info (centered in row)
@@ -1199,6 +1356,23 @@ function m.refreshBanish()
                 row.banishBtn:Hide()
             end
         end
+    end
+
+    -- Unattributed curses (found via target-scan, no known caster)
+    local unknownList = {}
+    for shortName, data in pairs(m.curses) do
+        if data.caster == "Unknown" then
+            table.insert(unknownList, (CURSE_COLORS[shortName] or "|cffffffff")..shortName.."|r")
+        end
+    end
+    if table.getn(unknownList) > 0 and cfg("showCurseSection") then
+        f.unknownCurseLine:ClearAllPoints()
+        f.unknownCurseLine:SetPoint("TopLeft", f, "TopLeft", 6, curY - 2)
+        f.unknownCurseLine:SetText("|cff888888On target, unattributed:|r "..table.concat(unknownList, ", "))
+        f.unknownCurseLine:Show()
+        curY = curY - 14
+    else
+        f.unknownCurseLine:Hide()
     end
 
     -- Resize
@@ -1283,6 +1457,7 @@ function m.detectCurse(msg, caster)
             if shouldUpdate then
                 m.curses[shortName] = { caster = casterName }
                 say((CURSE_COLORS[shortName] or "|cffffffff")..shortName.."|r detected — cast by |cffa050ff"..casterName.."|r")
+                m.logHistory(casterName.." cast "..shortName)
                 if cfg("announceCurse") then
                     sendGroup("[Curse] "..casterName.." is on "..shortName.." ("..fullName..")")
                 end
@@ -1570,6 +1745,19 @@ function m.createSettings()
     makeButton(s, "Scan group for soulstones", function()
         m.scanForSoulstones()
     end, y) y = y - 26
+    makeButton(s, "Scan target for curses", function()
+        m.scanForCurses()
+    end, y) y = y - 26
+    makeButton(s, "Force resync with group", function()
+        local channel = GetNumRaidMembers() > 0 and "RAID" or (GetNumPartyMembers() > 0 and "PARTY" or nil)
+        if not channel then
+            say("Not in a group -- nothing to sync.")
+        else
+            m.rebroadcastKnownData()
+            SendAddonMessage(ADDON_MSG_PREFIX, "SYNCREQ", channel)
+            say("Resync requested -- rebroadcast your data and asked others to do the same.")
+        end
+    end, y) y = y - 26
     makeButton(s, "Reset position & size", function()
         SoulstoneTrackerDB.position = nil
         SoulstoneTrackerDB.size = nil
@@ -1617,6 +1805,8 @@ eFrame:RegisterEvent("PLAYER_LEAVING_WORLD")
 eFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
 eFrame:RegisterEvent("PARTY_MEMBERS_CHANGED")
 eFrame:RegisterEvent("RAID_ROSTER_UPDATE")
+eFrame:RegisterEvent("PLAYER_TARGET_CHANGED")
+eFrame:RegisterEvent("BAG_UPDATE")
 eFrame:RegisterEvent("SPELLCAST_START")
 eFrame:RegisterEvent("CHAT_MSG_SPELL_PERIODIC_SELF_BUFFS")
 eFrame:RegisterEvent("CHAT_MSG_SPELL_PERIODIC_FRIENDLYPLAYER_BUFFS")
@@ -1669,6 +1859,7 @@ eFrame:SetScript("OnEvent", function()
             if e >= 2 then
                 t:SetScript("OnUpdate", nil)
                 m.scanForSoulstones()
+                m.updateAndBroadcastShards()
                 -- Request sync from others with the addon
                 local channel = GetNumRaidMembers() > 0 and "RAID" or (GetNumPartyMembers() > 0 and "PARTY" or nil)
                 if channel then
@@ -1709,6 +1900,42 @@ eFrame:SetScript("OnEvent", function()
                 if channel then
                     SendAddonMessage(ADDON_MSG_PREFIX, "SYNCREQ", channel)
                 end
+            end
+        end)
+
+    elseif event == "PLAYER_TARGET_CHANGED" then
+        -- Debounced silent curse scan on the new target -- catches curses
+        -- from warlocks who don't have the addon (best-effort, no caster
+        -- attribution possible). Debounced since target changes can fire
+        -- rapidly while tab-targeting.
+        if m.__targetScanTimer then
+            m.__targetScanTimer:SetScript("OnUpdate", nil)
+        end
+        local t2 = CreateFrame("Frame")
+        m.__targetScanTimer = t2
+        local e2 = 0
+        t2:SetScript("OnUpdate", function()
+            e2 = e2 + arg1
+            if e2 >= 0.5 then
+                t2:SetScript("OnUpdate", nil)
+                m.scanForCurses(true)
+            end
+        end)
+
+    elseif event == "BAG_UPDATE" then
+        -- Debounced since bag updates fire once per slot touched, and a
+        -- single bag operation (looting, splitting stacks) can touch many.
+        if m.__shardScanTimer then
+            m.__shardScanTimer:SetScript("OnUpdate", nil)
+        end
+        local t3 = CreateFrame("Frame")
+        m.__shardScanTimer = t3
+        local e3 = 0
+        t3:SetScript("OnUpdate", function()
+            e3 = e3 + arg1
+            if e3 >= 1 then
+                t3:SetScript("OnUpdate", nil)
+                m.updateAndBroadcastShards()
             end
         end)
 
@@ -1904,25 +2131,15 @@ eFrame:SetScript("OnEvent", function()
                     m.curses[shortName] = nil
                     m.refresh()
                 end
+            elseif string.find(arg2, "^SHARDS:") then
+                local countStr = string.sub(arg2, 8) -- strip leading "SHARDS:" (7 chars)
+                local count = tonumber(countStr)
+                if count and arg4 ~= UnitName("player") then
+                    m.shardCounts[arg4] = count
+                    m.refreshBanish()
+                end
             elseif arg2 == "SYNCREQ" and arg4 ~= UnitName("player") then
-                -- Someone is requesting our stone data - send all our stones
-                -- (except our own uncertain scanned entries -- those
-                -- shouldn't propagate and risk overwriting someone else's
-                -- accurate value with a guess)
-                local channel = GetNumRaidMembers() > 0 and "RAID" or "PARTY"
-                for target, data in pairs(m.stones) do
-                    if data.expires > time() and not data.unknownExpiry then
-                        SendAddonMessage(ADDON_MSG_PREFIX, "ADD:"..target..":"..data.caster..":"..data.expires, channel)
-                    end
-                end
-                -- Also sync banish assignments
-                for wName, iconIdx in pairs(m.banish) do
-                    SendAddonMessage(ADDON_MSG_PREFIX, "BANISH:"..wName..":"..iconIdx, channel)
-                end
-                -- Also sync curses
-                for shortName, data in pairs(m.curses) do
-                    SendAddonMessage(ADDON_MSG_PREFIX, "CURSE:"..shortName..":"..data.caster, channel)
-                end
+                m.rebroadcastKnownData()
             end
         end
     end
@@ -2003,6 +2220,50 @@ SlashCmdList["SOULSTONETRACKER"] = function(args)
 
     elseif cmd == "scan" then
         m.scanForSoulstones()
+
+    elseif cmd == "scancurse" then
+        m.scanForCurses()
+
+    elseif cmd == "shards" then
+        m.updateAndBroadcastShards()
+        local any = false
+        for name, count in pairs(m.shardCounts) do
+            any = true
+            say(classColorName(name, "|cffa050ff").." — "..count.." shards")
+        end
+        if not any then say("No shard data yet.") end
+
+    elseif string.find(cmd, "^history") then
+        local numStr = string.find(cmd, " ") and string.sub(cmd, string.find(cmd, " ") + 1)
+        local n = (numStr and tonumber(numStr)) or 15
+        local total = table.getn(m.history)
+        if total == 0 then
+            say("No history logged this session yet.")
+        else
+            say("Last "..math.min(n, total).." event(s) this session:")
+            local start = math.max(1, total - n + 1)
+            for i = start, total do
+                local entry = m.history[i]
+                local elapsed = time() - entry.time
+                local ago
+                if elapsed < 60 then
+                    ago = elapsed.."s ago"
+                else
+                    ago = math.floor(elapsed/60).."m ago"
+                end
+                say("|cff888888["..ago.."]|r "..entry.text)
+            end
+        end
+
+    elseif cmd == "resync" then
+        local channel = GetNumRaidMembers() > 0 and "RAID" or (GetNumPartyMembers() > 0 and "PARTY" or nil)
+        if not channel then
+            say("Not in a group -- nothing to sync.")
+        else
+            m.rebroadcastKnownData()
+            SendAddonMessage(ADDON_MSG_PREFIX, "SYNCREQ", channel)
+            say("Resync requested -- rebroadcast your data and asked others to do the same.")
+        end
 
     elseif cmd == "list" then
         local n = 0
@@ -2118,6 +2379,10 @@ SlashCmdList["SOULSTONETRACKER"] = function(args)
         say("|cffffd700/ss lock|r — toggle frame lock")
         say("|cffffd700/ss scale 0.8|r — resize (0.5-2.0)")
         say("|cffffd700/ss scan|r — scan group for existing stones")
+        say("|cffffd700/ss scancurse|r — scan your target for curses (unknown caster)")
+        say("|cffffd700/ss resync|r — force resync of known data with group")
+        say("|cffffd700/ss shards|r — list known soul shard counts")
+        say("|cffffd700/ss history [n]|r — show last n session events (default 15)")
         say("|cffffd700/ss diag aura|r — toggle live aura-cast spellId/duration diagnostic")
         say("|cffffd700/ss reset|r — reset position and size")
 
