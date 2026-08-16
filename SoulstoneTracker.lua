@@ -159,8 +159,8 @@ local function classColorName(name, defaultColorCode)
             end
         end
     end
-    if class and RAID_CLASS_COLORS[class] then
-        local c = RAID_CLASS_COLORS[class]
+    if class and RAID_CLASS_COLORS[string.upper(class)] then
+        local c = RAID_CLASS_COLORS[string.upper(class)]
         return string.format("|cff%02x%02x%02x", c.r*255, c.g*255, c.b*255)..name.."|r"
     end
     return (defaultColorCode or "|cffffffff")..name.."|r"
@@ -336,7 +336,11 @@ function m.clearExpired()
             if cfg("warnFiveMin") then
                 say("|cffff7c0a[WARNING]|r Soulstone on |cffffffff"..target.."|r expires in "..cfg("warnMinutes").." minutes!")
                 playSound("RAID_WARNING")
-                if cfg("announceWarnings") then
+                -- Only the actual caster's client broadcasts to raid chat --
+                -- every client independently evaluates the same synced
+                -- data on the same timer, so without this every warlock
+                -- running the addon would announce identically at once.
+                if cfg("announceWarnings") and data.caster == UnitName("player") then
                     sendGroup("[Soulstone] WARNING: "..target.."'s soulstone expires in "..cfg("warnMinutes").." minutes!")
                 end
             end
@@ -349,7 +353,7 @@ function m.clearExpired()
             if cfg("warnOneMin") then
                 say("|cffff3333[WARNING]|r Soulstone on |cffffffff"..target.."|r expires in "..cfg("warnSeconds").." seconds!")
                 playSound("RAID_WARNING")
-                if cfg("announceWarnings") then
+                if cfg("announceWarnings") and data.caster == UnitName("player") then
                     sendGroup("[Soulstone] WARNING: "..target.."'s soulstone expires in "..cfg("warnSeconds").." seconds!")
                 end
             end
@@ -360,7 +364,7 @@ function m.clearExpired()
             if cfg("warnExpired") then
                 say("|cffff3333[WARNING]|r Soulstone expired on |cffffffff"..target.."|r")
                 playSound("LOOTCLOSE")
-                if cfg("announceExpired") then
+                if cfg("announceExpired") and data.caster == UnitName("player") then
                     sendGroup("[Soulstone] "..target.."'s soulstone has expired!")
                 end
             end
@@ -511,8 +515,10 @@ function m.scanForCurses(silent)
         if not tex then break end
         for shortName, iconName in pairs(CURSE_ICON_NAMES) do
             if string.find(tex, iconName, 1, true) then
-                -- Don't overwrite a confidently-known caster with a guess
-                if not m.curses[shortName] or m.curses[shortName].caster == "Unknown" then
+                -- Only a genuinely new discovery counts as newsworthy --
+                -- don't re-announce something we already know about every
+                -- time the debounced auto-scan re-runs on retarget.
+                if not m.curses[shortName] then
                     m.curses[shortName] = { caster = "Unknown" }
                     found = found + 1
                 end
@@ -521,7 +527,9 @@ function m.scanForCurses(silent)
         i = i + 1
     end
     if found > 0 then
-        say("Found "..found.." existing curse(s) on your target (caster unknown).")
+        if not silent then
+            say("Found "..found.." new curse(s) on your target (caster unknown -- see curse section).")
+        end
         m.refreshBanish()
     elseif not silent then
         say("No curses found on your target.")
@@ -723,7 +731,7 @@ function m.createFrame()
     local title = titleBar:CreateFontString(nil, "OVERLAY")
     title:SetFont(FONT, 11, "OUTLINE")
     title:SetPoint("Left", titleBar, "Left", 6, 0)
-    title:SetText("|cffffd700Soulstone Tracker v1.2|r")
+    title:SetText("|cffffd700Soulstone Tracker v1.4|r")
     f.title = title
 
     -- Settings button (defined in XML with BLP texture)
@@ -1173,7 +1181,7 @@ function m.refresh()
     if table.getn(missing) > 0 and (GetNumRaidMembers() > 0 or GetNumPartyMembers() > 0) then
         f.title:SetText("|cffffd700Soulstone Tracker|r |cffff7c0a["..table.getn(missing).." available]|r")
     else
-        f.title:SetText("|cffffd700Soulstone Tracker v1.2|r")
+        f.title:SetText("|cffffd700Soulstone Tracker v1.4|r")
     end
 
     if count == 0 then f.empty:Show() else f.empty:Hide() end
@@ -1798,6 +1806,7 @@ end
 -- Solution: broadcast via addon message with caster info, and use target unit scanning
 
 local lastCaster = nil
+local isSelfCast = false
 
 local eFrame = CreateFrame("Frame")
 eFrame:RegisterEvent("PLAYER_LOGIN")
@@ -1952,6 +1961,7 @@ eFrame:SetScript("OnEvent", function()
         -- Only fires for player's own casts
         if arg1 and string.find(arg1, "Soulstone Resurrection") then
             lastCaster = UnitName("player")
+            isSelfCast = true
             -- Broadcast that we're casting so others know the caster
             if GetNumRaidMembers() > 0 then
                 SendAddonMessage(ADDON_MSG_PREFIX, "CASTING:"..UnitName("player")..">"..UnitName("target"), "RAID")
@@ -1974,7 +1984,7 @@ eFrame:SetScript("OnEvent", function()
         -- Otherwise skip rather than guessing "Unknown" and broadcasting a
         -- wrong/premature attribution that could race the real caster's own.
         if arg1 and string.find(arg1, "Soulstone Resurrection") and lastCaster then
-            m.addStone(UnitName("player"), lastCaster)
+            m.addStone(UnitName("player"), lastCaster, nil, not isSelfCast)
             lastCaster = nil
         end
 
@@ -1989,7 +1999,7 @@ eFrame:SetScript("OnEvent", function()
             local pos = string.find(arg1, suffix, 1, true)
             local target = pos and string.sub(arg1, 1, pos - 1)
             if target and target ~= "" and lastCaster then
-                m.addStone(target, lastCaster)
+                m.addStone(target, lastCaster, nil, not isSelfCast)
                 lastCaster = nil
             end
         end
@@ -2033,7 +2043,7 @@ eFrame:SetScript("OnEvent", function()
         -- so blindly trusting it would reintroduce the same cross-warlock
         -- misattribution risk we already fixed for curses.
         if arg3 == SOULSTONE_SPELL_ID and lastCaster then
-            m.addStone(UnitName("player"), lastCaster, time() + SOULSTONE_DURATION)
+            m.addStone(UnitName("player"), lastCaster, time() + SOULSTONE_DURATION, not isSelfCast)
             lastCaster = nil
         end
         if m.diagAura then
@@ -2045,7 +2055,7 @@ eFrame:SetScript("OnEvent", function()
         if arg3 == SOULSTONE_SPELL_ID and lastCaster then
             local targetName = UnitName(arg1)
             if targetName then
-                m.addStone(targetName, lastCaster, time() + SOULSTONE_DURATION)
+                m.addStone(targetName, lastCaster, time() + SOULSTONE_DURATION, not isSelfCast)
                 lastCaster = nil
             end
         end
@@ -2087,6 +2097,7 @@ eFrame:SetScript("OnEvent", function()
                 local target = gtPos and string.sub(rest, gtPos + 1)
                 if caster and target and caster ~= "" and target ~= "" and arg4 ~= UnitName("player") then
                     lastCaster = caster
+                    isSelfCast = false
                 end
             elseif string.find(arg2, "^ADD:") then
                 local rest = string.sub(arg2, 5) -- strip leading "ADD:" (4 chars)
