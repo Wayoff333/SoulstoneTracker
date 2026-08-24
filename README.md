@@ -10,6 +10,8 @@ Tracks Soulstones caster and target, will sync/update if others have the addon i
 
 please let me know if you run into any issues!
 
+---------------------------------------------------------------------------------------------------------------------------
+
 1.5
 
 added transparency slider
