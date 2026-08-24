@@ -10,6 +10,13 @@ Tracks Soulstones caster and target, will sync/update if others have the addon i
 
 please let me know if you run into any issues!
 
+1.5
+added transparency slider
+fixed SS remaining and timer
+fixed column width
+S icon does a sync now vs scan
+added ability to hide when not in party/raid
+
 <img width="995" height="1027" alt="image" src="https://github.com/user-attachments/assets/2e13006e-e6b0-4ad4-87e2-b2180400cd27" />
 
 V1.2 added settings page cleaned up icons
