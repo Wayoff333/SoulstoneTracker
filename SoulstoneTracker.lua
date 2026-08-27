@@ -61,6 +61,7 @@ m.stones   = {}
 m.curses   = {}  -- { shortName = { caster } }
 m.banish   = {}  -- { warlockName = raidIconIndex }
 m.shardCounts = {} -- { warlockName = count }
+m.ssCooldowns = {} -- { warlockName = readyAtEpochSeconds (0/nil = ready now) }
 m.history = {} -- { {text=..., time=...}, ... } session-only log
 m.frame    = nil
 m.settings = nil  -- settings panel frame
@@ -82,6 +83,7 @@ local DEFAULTS = {
     showCurseSection  = true,
     showBanishSection = true,
     frameAlpha        = 0.95,
+    hideWhenSolo      = false,
     -- Timing
     warnMinutes       = 5,   -- first warning threshold in minutes
     warnSeconds       = 60,  -- second warning threshold in seconds
@@ -464,6 +466,35 @@ function m.updateAndBroadcastShards()
     m.refreshBanish()
 end
 
+-- Tracks the soulstone-USE cooldown (separate from a stone's 30-min
+-- duration on the target -- this is whether the warlock can use/make a NEW
+-- one right now). Confirmed via in-game tooltip: using a soulstone puts a
+-- fixed 30-min cooldown on it. Five different Blizzard/nampower cooldown
+-- APIs were all tried and all failed against a real, tooltip-confirmed
+-- active cooldown (GetSpellIdCooldown, GetItemCooldown by name, by numeric
+-- ID, GetSpellCooldown via spellbook slot, GetContainerItemCooldown) --
+-- rather than keep guessing at a sixth API, this just starts our OWN
+-- 30-minute timer at the exact moment we detect a real soulstone
+-- application, reusing the detection logic that's already proven solid
+-- all session. No API dependency, no bag-scan requirement.
+local lastBroadcastReadyAt = nil
+function m.startOwnSoulstoneCooldown()
+    local readyAt = time() + SOULSTONE_DURATION
+    m.ssCooldowns[UnitName("player")] = readyAt
+    if not lastBroadcastReadyAt or math.abs((lastBroadcastReadyAt or 0) - readyAt) > 5 then
+        lastBroadcastReadyAt = readyAt
+        local channel = GetNumRaidMembers() > 0 and "RAID" or (GetNumPartyMembers() > 0 and "PARTY" or nil)
+        if channel then
+            SendAddonMessage(ADDON_MSG_PREFIX, "SSCD:"..readyAt, channel)
+        end
+    end
+    m.refreshBanish()
+end
+-- Kept as a no-op stub so the periodic ticker's existing call site doesn't
+-- need touching -- the timer above is event-driven now, not polled.
+function m.updateSoulstoneCooldown()
+end
+
 -- Session-only log of "who stoned who, when" and curse/banish assignments,
 -- for answering "did I get stoned tonight" type questions after a wipe.
 function m.logHistory(text)
@@ -491,6 +522,14 @@ function m.rebroadcastKnownData()
         if data.caster ~= "Unknown" then
             SendAddonMessage(ADDON_MSG_PREFIX, "CURSE:"..shortName..":"..data.caster, channel)
         end
+    end
+    local myShards = m.shardCounts[UnitName("player")]
+    if myShards then
+        SendAddonMessage(ADDON_MSG_PREFIX, "SHARDS:"..myShards, channel)
+    end
+    local myCd = m.ssCooldowns[UnitName("player")]
+    if myCd then
+        SendAddonMessage(ADDON_MSG_PREFIX, "SSCD:"..myCd, channel)
     end
 end
 
@@ -691,7 +730,7 @@ function m.createFrame()
         edgeSize = 1,
         insets   = { left=1, right=1, top=1, bottom=1 }
     })
-    f:SetBackdropColor(0.05, 0.05, 0.08, 0.95)
+    f:SetBackdropColor(0.05, 0.05, 0.08, cfg("frameAlpha"))
     f:SetBackdropBorderColor(0.25, 0.25, 0.35, 1)
     f:EnableMouse(true)
     f:SetMovable(true)
@@ -731,7 +770,7 @@ function m.createFrame()
     local title = titleBar:CreateFontString(nil, "OVERLAY")
     title:SetFont(FONT, 11, "OUTLINE")
     title:SetPoint("Left", titleBar, "Left", 6, 0)
-    title:SetText("|cffffd700Soulstone Tracker v1.4|r")
+    title:SetText("|cffffd700Soulstone Tracker v1.5|r")
     f.title = title
 
     -- Settings button (defined in XML with BLP texture)
@@ -745,32 +784,34 @@ function m.createFrame()
     local scanBtn = CreateFrame("Button", nil, titleBar)
     scanBtn:SetWidth(16) scanBtn:SetHeight(16)
     scanBtn:SetPoint("Right", titleBar, "Right", -60, 0)
-    local scanTex = scanBtn:CreateTexture(nil, "ARTWORK")
-    scanTex:SetAllPoints(scanBtn)
-    scanTex:SetTexture("Interface\\Icons\\INV_Misc_Spyglass_03")
-    scanTex:SetTexCoord(0.08, 0.92, 0.08, 0.92)
-    -- Try to flatten the shaded item-icon look toward the other buttons'
-    -- flat/vector style. Guarded since SetDesaturated may not exist on
-    -- this client.
-    if scanTex.SetDesaturated then
-        scanTex:SetDesaturated(true)
-    end
-    -- Muted teal/grey to match the lock/settings icons' palette instead of
-    -- the spyglass's default full-color item-icon look.
-    scanTex:SetVertexColor(0.75, 0.85, 0.85)
+    -- Text glyph instead of a mismatched item icon -- guaranteed to fit the
+    -- theme since it's just colored text, same approach (and now the exact
+    -- same colors) as the settings panel's own text-based close button.
+    local scanTxt = scanBtn:CreateFontString(nil, "OVERLAY")
+    scanTxt:SetFont(FONT, 13, "OUTLINE")
+    scanTxt:SetAllPoints(scanBtn)
+    scanTxt:SetJustifyH("Center")
+    scanTxt:SetJustifyV("Middle")
+    scanTxt:SetText("|cffaaaaaaS|r")
     scanBtn:SetScript("OnEnter", function()
         GameTooltip:SetOwner(scanBtn, "ANCHOR_LEFT")
-        GameTooltip:SetText("Scan for existing soulstones")
+        GameTooltip:SetText("Force resync with group")
         GameTooltip:Show()
-        -- Same gold accent used for the title text elsewhere in the addon.
-        scanTex:SetVertexColor(1, 0.84, 0)
+        scanTxt:SetText("|cffffffffS|r")
     end)
     scanBtn:SetScript("OnLeave", function()
         GameTooltip:Hide()
-        scanTex:SetVertexColor(0.75, 0.85, 0.85)
+        scanTxt:SetText("|cffaaaaaaS|r")
     end)
     scanBtn:SetScript("OnClick", function()
-        m.scanForSoulstones()
+        local channel = GetNumRaidMembers() > 0 and "RAID" or (GetNumPartyMembers() > 0 and "PARTY" or nil)
+        if not channel then
+            say("Not in a group -- nothing to sync.")
+        else
+            m.rebroadcastKnownData()
+            SendAddonMessage(ADDON_MSG_PREFIX, "SYNCREQ", channel)
+            say("Resync requested -- rebroadcast your data and asked others to do the same.")
+        end
     end)
 
     -- Lock button (defined in XML with BLP texture)
@@ -1107,6 +1148,8 @@ function m.createFrame()
 
     -- Ticker
     local tick = 0
+    local ssCdTick = 0
+    local autoSyncTick = 0
     local flashTime = 0
     local flashDir = 1
     f:SetScript("OnUpdate", function()
@@ -1115,6 +1158,23 @@ function m.createFrame()
             tick = 0
             m.clearExpired()
             m.refresh()
+        end
+        ssCdTick = ssCdTick + arg1
+        if ssCdTick >= 15 then
+            ssCdTick = 0
+            m.updateSoulstoneCooldown()
+        end
+        autoSyncTick = autoSyncTick + arg1
+        if autoSyncTick >= 300 then
+            autoSyncTick = 0
+            -- Periodic background resync (every 5 min) to catch any drift
+            -- over a long raid session -- same logic as /ss resync, but
+            -- silent (no chat message) since this runs automatically.
+            local channel = GetNumRaidMembers() > 0 and "RAID" or (GetNumPartyMembers() > 0 and "PARTY" or nil)
+            if channel then
+                m.rebroadcastKnownData()
+                SendAddonMessage(ADDON_MSG_PREFIX, "SYNCREQ", channel)
+            end
         end
         local shouldFlash = false
         local now = time()
@@ -1181,7 +1241,7 @@ function m.refresh()
     if table.getn(missing) > 0 and (GetNumRaidMembers() > 0 or GetNumPartyMembers() > 0) then
         f.title:SetText("|cffffd700Soulstone Tracker|r |cffff7c0a["..table.getn(missing).." available]|r")
     else
-        f.title:SetText("|cffffd700Soulstone Tracker v1.4|r")
+        f.title:SetText("|cffffd700Soulstone Tracker v1.5|r")
     end
 
     if count == 0 then f.empty:Show() else f.empty:Hide() end
@@ -1215,9 +1275,26 @@ function m.refresh()
     m.refreshBanish()
 end
 
+-- Auto-shows/hides the frame based on party/raid membership, if the
+-- "hideWhenSolo" setting is enabled. Never fights a manual close -- if the
+-- user explicitly hid the frame (X button), this won't force it back open.
+function m.updateGroupVisibility()
+    if not m.frame then return end
+    if not cfg("hideWhenSolo") then return end
+    if SoulstoneTrackerDB.hidden then return end
+    local inGroup = GetNumRaidMembers() > 0 or GetNumPartyMembers() > 0
+    if inGroup then
+        if not m.frame:IsShown() then m.frame:Show() end
+    else
+        if m.frame:IsShown() then m.frame:Hide() end
+    end
+end
+
 function m.refreshBanish()
     if not m.frame then return end
     local f = m.frame
+    f:SetBackdropColor(0.05, 0.05, 0.08, cfg("frameAlpha"))
+    m.updateGroupVisibility()
     local SEC_ROW_H = 18
     local HEADER_H2 = 10
 
@@ -1292,46 +1369,69 @@ function m.refreshBanish()
                     row.bg:SetHeight(SEC_ROW_H)
                     row.bg:Show()
 
+                    -- Fixed-width columns anchored from the right edge, so
+                    -- name/curse/banish can never overlap regardless of
+                    -- frame width (the old percentage-based layout had a
+                    -- built-in overlap zone between the name and curse
+                    -- columns). Banish only needs its 16px icon, curse
+                    -- needs icon+3-letter label, name gets whatever's left.
+                    local BANISH_COL_W = 44
+                    local CURSE_COL_W = 52
+                    -- Prefer a compact, close-to-name position; only fall
+                    -- back to the right-edge-anchored math (which guarantees
+                    -- no overlap) when the frame is narrow enough to need it.
+                    local compactCurseColX = 175
+                    local curseColX = math.min(compactCurseColX, f:GetWidth() - BANISH_COL_W - CURSE_COL_W)
+
                     -- Name
                     row.nameTxt:ClearAllPoints()
                     row.nameTxt:SetPoint("TopLeft", f, "TopLeft", 8, curY - 2)
-                    row.nameTxt:SetWidth(f:GetWidth() * 0.5)
+                    row.nameTxt:SetWidth(curseColX - 12)
                     local nameStr = classColorName(wName, "|cffa050ff")
                     if m.shardCounts[wName] then
                         nameStr = nameStr.." |cffcc66ff("..m.shardCounts[wName]..")|r"
                     end
+                    local readyAt = m.ssCooldowns[wName]
+                    if readyAt and readyAt > time() then
+                        local mins = math.ceil((readyAt - time()) / 60)
+                        nameStr = nameStr.." |cffff6666[SS "..mins.."m]|r"
+                    elseif readyAt then
+                        nameStr = nameStr.." |cff00ff00[SS rdy]|r"
+                    end
                     row.nameTxt:SetText(nameStr)
                     row.nameTxt:Show()
 
-                    -- Curse info (centered in row)
+                    -- Curse info (fixed-width column)
                     local shortName = warlockCurse[wName]
                     if shortName then
                         row.curseIcon:ClearAllPoints()
-                        row.curseIcon:SetPoint("TopLeft", f, "TopLeft", math.floor(f:GetWidth() * 0.45), curY - 2)
+                        row.curseIcon:SetPoint("TopLeft", f, "TopLeft", curseColX, curY - 2)
                         row.curseIcon:SetTexture(CURSE_ICONS[shortName] or "Interface\\Icons\\Spell_Shadow_Curse")
                         row.curseIcon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
                         row.curseIcon:Show()
                         row.curseLbl:ClearAllPoints()
-                        row.curseLbl:SetPoint("TopLeft", f, "TopLeft", math.floor(f:GetWidth() * 0.45) + 18, curY - 2)
+                        row.curseLbl:SetPoint("TopLeft", f, "TopLeft", curseColX + 18, curY - 2)
+                        row.curseLbl:SetWidth(CURSE_COL_W - 18)
                         row.curseLbl:SetText((CURSE_COLORS[shortName] or "|cffffffff")..shortName.."|r")
                         row.curseLbl:Show()
                     else
                         row.curseIcon:Hide()
                         row.curseLbl:ClearAllPoints()
-                        row.curseLbl:SetPoint("TopLeft", f, "TopLeft", math.floor(f:GetWidth() * 0.45), curY - 2)
+                        row.curseLbl:SetPoint("TopLeft", f, "TopLeft", curseColX, curY - 2)
+                        row.curseLbl:SetWidth(CURSE_COL_W)
                         row.curseLbl:SetText("|cff666666-|r")
                         row.curseLbl:Show()
                     end
 
                     -- Curse override hitbox (covers icon+label area, click to manually set)
                     row.curseBtn:ClearAllPoints()
-                    row.curseBtn:SetPoint("TopLeft", f, "TopLeft", math.floor(f:GetWidth() * 0.45) - 2, curY - 2)
-                    row.curseBtn:SetWidth(48)
+                    row.curseBtn:SetPoint("TopLeft", f, "TopLeft", curseColX - 2, curY - 2)
+                    row.curseBtn:SetWidth(CURSE_COL_W)
                     row.curseBtn:Show()
 
-                    -- Banish icon button (right side, moved in from edge)
+                    -- Banish icon button (fixed-width column, right edge)
                     row.banishBtn:ClearAllPoints()
-                    row.banishBtn:SetPoint("TopRight", f, "TopRight", -24, curY - 1)
+                    row.banishBtn:SetPoint("TopRight", f, "TopRight", -28, curY - 1)
                     row.banishBtn:Show()
                     local iconIdx = m.banish[wName]
                     if iconIdx and RAID_ICONS[iconIdx] then
@@ -1684,6 +1784,48 @@ function m.createSettings()
         return slider
     end
 
+    -- Dedicated slider for frameAlpha specifically: displays as a 0-100%
+    -- percentage (more intuitive) while storing/reading the underlying
+    -- 0-1 float config value, and applies live rather than requiring reopen.
+    local function makeAlphaSlider(parent, label, yOff)
+        local lbl = parent:CreateFontString(nil, "OVERLAY")
+        lbl:SetFont("Fonts\\FRIZQT__.TTF", 10, "OUTLINE")
+        lbl:SetTextColor(0.85, 0.85, 0.85, 1)
+        lbl:SetPoint("TopLeft", parent, "TopLeft", 10, yOff)
+        lbl:SetText(label)
+
+        local valLbl = parent:CreateFontString(nil, "OVERLAY")
+        valLbl:SetFont("Fonts\\FRIZQT__.TTF", 10, "OUTLINE")
+        valLbl:SetTextColor(0.6, 0.3, 1, 1)
+        valLbl:SetPoint("TopRight", parent, "TopRight", -10, yOff)
+        valLbl:SetJustifyH("Right")
+
+        local sliderName = "SSTracker_Slider_frameAlpha"
+        local slider = CreateFrame("Slider", sliderName, parent, "OptionsSliderTemplate")
+        slider:SetWidth(SW - 30)
+        slider:SetHeight(16)
+        slider:SetPoint("TopLeft", parent, "TopLeft", 10, yOff - 14)
+        slider:SetMinMaxValues(10, 100)
+        slider:SetValueStep(5)
+        local startPct = math.floor(cfg("frameAlpha") * 100 + 0.5)
+        slider:SetValue(startPct)
+        getglobal(sliderName.."Low"):SetText("10%")
+        getglobal(sliderName.."High"):SetText("100%")
+        local sliderText = getglobal(sliderName.."Text")
+        sliderText:SetText(startPct.."%")
+        sliderText:SetFont("Fonts\\FRIZQT__.TTF", 10, "OUTLINE")
+        slider.valLbl = valLbl
+        slider:SetScript("OnValueChanged", function()
+            local pct = math.floor(this:GetValue() / 5 + 0.5) * 5
+            setCfg("frameAlpha", pct / 100)
+            getglobal(this:GetName().."Text"):SetText(pct.."%")
+            this.valLbl:SetText(pct.."%")
+            m.refreshBanish()
+        end)
+        valLbl:SetText(startPct.."%")
+        return slider
+    end
+
     -- Helper for action button
     local function makeButton(parent, label, onClick, yOff)
         local btn = CreateFrame("Button", nil, parent)
@@ -1733,6 +1875,8 @@ function m.createSettings()
     -- DISPLAY section
     makeHeader(s, "DISPLAY", y) y = y - 14
     s.checks["showCurseSection"]  = makeToggle(s, "Show curse & banish section",     "showCurseSection",  y) y = y - 24
+    s.checks["hideWhenSolo"]      = makeToggle(s, "Hide when not in party/raid",     "hideWhenSolo",       y) y = y - 24
+    s.alphaSlider = makeAlphaSlider(s, "Background transparency:", y) y = y - 46
 
     -- TIMING section
     makeHeader(s, "WARNING THRESHOLDS", y) y = y - 14
@@ -1793,6 +1937,11 @@ function m.refreshSettings()
     if s.warnSecSlider then
         s.warnSecSlider:SetValue(cfg("warnSeconds"))
         getglobal(s.warnSecSlider:GetName().."Text"):SetText(tostring(cfg("warnSeconds")))
+    end
+    if s.alphaSlider then
+        local pct = math.floor(cfg("frameAlpha") * 100 + 0.5)
+        s.alphaSlider:SetValue(pct)
+        getglobal(s.alphaSlider:GetName().."Text"):SetText(pct.."%")
     end
 end
 
@@ -1858,8 +2007,16 @@ eFrame:SetScript("OnEvent", function()
         loadAll()
         m.createFrame()
         m.createMinimapButton()
+        -- Baseline "ready" state -- purely event-driven now (no cooldown
+        -- API works on this client), so without this the display would stay
+        -- blank until the first soulstone cast is actually detected this
+        -- session. If you're actually still on cooldown from before this
+        -- reload, it'll incorrectly show ready until corrected by your next
+        -- real cast -- an accepted limitation given no API can tell us.
+        m.ssCooldowns[UnitName("player")] = 0
         if SoulstoneTrackerDB.hidden then m.frame:Hide() else m.frame:Show() end
         if SoulstoneTrackerDB.locked then m.locked = true m.frame.updateLock() end
+        m.updateGroupVisibility()
         m.refreshBanish()
         say("Loaded. Type |cffffd700/ss help|r for commands.")
         local t = CreateFrame("Frame") local e = 0
@@ -1869,6 +2026,7 @@ eFrame:SetScript("OnEvent", function()
                 t:SetScript("OnUpdate", nil)
                 m.scanForSoulstones()
                 m.updateAndBroadcastShards()
+                m.updateSoulstoneCooldown()
                 -- Request sync from others with the addon
                 local channel = GetNumRaidMembers() > 0 and "RAID" or (GetNumPartyMembers() > 0 and "PARTY" or nil)
                 if channel then
@@ -1882,6 +2040,7 @@ eFrame:SetScript("OnEvent", function()
 
     elseif event == "PARTY_MEMBERS_CHANGED" or event == "RAID_ROSTER_UPDATE" then
         m.refreshBanish()
+        m.updateGroupVisibility()
         -- Debounced scan for existing soulstones on newly-joined members --
         -- without this, a stone already active on someone who just joined
         -- your group wouldn't be picked up until next login/zone change.
@@ -1985,6 +2144,7 @@ eFrame:SetScript("OnEvent", function()
         -- wrong/premature attribution that could race the real caster's own.
         if arg1 and string.find(arg1, "Soulstone Resurrection") and lastCaster then
             m.addStone(UnitName("player"), lastCaster, nil, not isSelfCast)
+            if isSelfCast then m.startOwnSoulstoneCooldown() end
             lastCaster = nil
         end
 
@@ -2000,6 +2160,7 @@ eFrame:SetScript("OnEvent", function()
             local target = pos and string.sub(arg1, 1, pos - 1)
             if target and target ~= "" and lastCaster then
                 m.addStone(target, lastCaster, nil, not isSelfCast)
+                if isSelfCast then m.startOwnSoulstoneCooldown() end
                 lastCaster = nil
             end
         end
@@ -2012,7 +2173,7 @@ eFrame:SetScript("OnEvent", function()
 
     elseif event == "CHAT_MSG_SPELL_AURA_GONE_OTHER" then
         if arg1 then
-            local target = string.match(arg1, "Soulstone Resurrection fades from (.+)%.")
+            local _, _, target = string.find(arg1, "Soulstone Resurrection fades from (.+)%.")
             if target then m.removeStone(target) end
             m.removeCurse(arg1)
         end
@@ -2026,6 +2187,7 @@ eFrame:SetScript("OnEvent", function()
             -- attribute directly to the local player.
             m.detectCurse(FULL_NAMES[shortName], UnitName("player"))
         end
+        m.updateSoulstoneCooldown()
 
     elseif event == "AURA_CAST_ON_OTHER" or event == "AURA_CAST_ON_SELF" then
         -- spellId, casterGuid, targetGuid, effect, effectAuraName, effectAmplitude, effectMiscValue, durationMs, auraCapStatus
@@ -2044,6 +2206,7 @@ eFrame:SetScript("OnEvent", function()
         -- misattribution risk we already fixed for curses.
         if arg3 == SOULSTONE_SPELL_ID and lastCaster then
             m.addStone(UnitName("player"), lastCaster, time() + SOULSTONE_DURATION, not isSelfCast)
+            if isSelfCast then m.startOwnSoulstoneCooldown() end
             lastCaster = nil
         end
         if m.diagAura then
@@ -2056,6 +2219,7 @@ eFrame:SetScript("OnEvent", function()
             local targetName = UnitName(arg1)
             if targetName then
                 m.addStone(targetName, lastCaster, time() + SOULSTONE_DURATION, not isSelfCast)
+                if isSelfCast then m.startOwnSoulstoneCooldown() end
                 lastCaster = nil
             end
         end
@@ -2083,7 +2247,7 @@ eFrame:SetScript("OnEvent", function()
 
     elseif event == "CHAT_MSG_COMBAT_FRIENDLY_DEATH" then
         if arg1 then
-            local dead = string.match(arg1, "(.+) dies%.")
+            local _, _, dead = string.find(arg1, "(.+) dies%.")
             if dead and m.stones[dead] then m.removeStone(dead) end
         end
 
@@ -2149,6 +2313,13 @@ eFrame:SetScript("OnEvent", function()
                     m.shardCounts[arg4] = count
                     m.refreshBanish()
                 end
+            elseif string.find(arg2, "^SSCD:") then
+                local readyAtStr = string.sub(arg2, 6) -- strip leading "SSCD:" (5 chars)
+                local readyAt = tonumber(readyAtStr)
+                if readyAt and arg4 ~= UnitName("player") then
+                    m.ssCooldowns[arg4] = readyAt
+                    m.refreshBanish()
+                end
             elseif arg2 == "SYNCREQ" and arg4 ~= UnitName("player") then
                 m.rebroadcastKnownData()
             end
@@ -2170,7 +2341,7 @@ SlashCmdList["SOULSTONETRACKER"] = function(args)
         m.stones = {} m.refresh() say("Cleared all soulstones.")
 
     elseif string.find(cmd, "^testcurse") then
-        local sn, caster = string.match(args, "%a+%s+(%a+)%s*(%a*)")
+        local _, _, sn, caster = string.find(args, "%a+%s+(%a+)%s*(%a*)")
         sn = sn or "CoE"
         local CURSE_LOOKUP = { coe="CoE", cos="CoS", cor="CoR", cow="CoW" }
         sn = CURSE_LOOKUP[string.lower(sn)] or sn
@@ -2209,7 +2380,7 @@ SlashCmdList["SOULSTONETRACKER"] = function(args)
         end
 
     elseif string.find(cmd, "^testcast") then
-        local target, caster, secs = string.match(args, "%a+%s+(%a+)%s*(%a*)%s*(%d*)")
+        local _, _, target, caster, secs = string.find(args, "%a+%s+(%a+)%s*(%a*)%s*(%d*)")
         if not target then
             say("Usage: |cffffd700/ss testcast <target> [caster] [seconds]|r")
         else
@@ -2220,7 +2391,7 @@ SlashCmdList["SOULSTONETRACKER"] = function(args)
         end
 
     elseif string.find(cmd, "^test") then
-        local secs = string.match(cmd, "test%s+(%d+)")
+        local _, _, secs = string.find(cmd, "test%s+(%d+)")
         local duration = tonumber(secs) or (30 * 60)
         m.addStone(UnitName("player"), UnitName("player"), time() + duration)
         if secs then
@@ -2243,6 +2414,21 @@ SlashCmdList["SOULSTONETRACKER"] = function(args)
             say(classColorName(name, "|cffa050ff").." — "..count.." shards")
         end
         if not any then say("No shard data yet.") end
+
+    elseif cmd == "sscd" then
+        m.updateSoulstoneCooldown()
+        local any = false
+        for name, readyAt in pairs(m.ssCooldowns) do
+            any = true
+            if readyAt > time() then
+                say(classColorName(name, "|cffa050ff").." — |cffff6666"..formatTime(readyAt - time()).." until ready|r")
+            else
+                say(classColorName(name, "|cffa050ff").." — |cff00ff00ready now|r")
+            end
+        end
+        if not any then
+            say("No soulstone cooldown data yet. (Requires nampower; won't work for non-warlocks.)")
+        end
 
     elseif string.find(cmd, "^history") then
         local numStr = string.find(cmd, " ") and string.sub(cmd, string.find(cmd, " ") + 1)
@@ -2366,7 +2552,7 @@ SlashCmdList["SOULSTONETRACKER"] = function(args)
         say("Position/size reset. /reload to apply.")
 
     elseif string.find(cmd, "^scale") then
-        local val = string.match(cmd, "scale%s+([%d%.]+)")
+        local _, _, val = string.find(cmd, "scale%s+([%d%.]+)")
         local scale = tonumber(val)
         if scale and scale >= 0.5 and scale <= 2.0 then
             m.frame:SetScale(scale)
@@ -2393,6 +2579,7 @@ SlashCmdList["SOULSTONETRACKER"] = function(args)
         say("|cffffd700/ss scancurse|r — scan your target for curses (unknown caster)")
         say("|cffffd700/ss resync|r — force resync of known data with group")
         say("|cffffd700/ss shards|r — list known soul shard counts")
+        say("|cffffd700/ss sscd|r — list soulstone-creation cooldowns")
         say("|cffffd700/ss history [n]|r — show last n session events (default 15)")
         say("|cffffd700/ss diag aura|r — toggle live aura-cast spellId/duration diagnostic")
         say("|cffffd700/ss reset|r — reset position and size")
